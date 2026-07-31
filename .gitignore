@@ -1,0 +1,21 @@
+# The service list is the one file here that would carry real internal
+# hostnames, addresses, and ports. It normally lives well outside this
+# checkout, at ~/.config/omarchy/dashboard/services.json — but `dataFile`
+# in shell.json can point anywhere, including here, so this is a backstop
+# against publishing a homelab's layout by accident.
+services.json
+*.services.json
+dashboard/
+
+# Local agent/editor state. Carries absolute paths under $HOME.
+.claude/
+.vscode/
+.idea/
+
+# Icon cache, if XDG_CACHE_HOME is ever redirected into the repo while testing.
+icons/
+icon-misses/
+
+*.swp
+*~
+.DS_Store

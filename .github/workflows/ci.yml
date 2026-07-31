@@ -1,0 +1,279 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq and shellcheck
+        run: sudo apt-get update && sudo apt-get install -y jq shellcheck
+
+      - name: manifest.json parses and has the fields the loader reads
+        run: |
+          jq -e '
+            .schemaVersion == 1
+            and (.id | test("^[a-z0-9]+([.-][a-z0-9]+)*$"))
+            and (.name | length > 0)
+            and (.version | length > 0)
+            and (.kinds | index("bar-widget"))
+            and (.entryPoints.barWidget | length > 0)
+            and (.barWidget.displayName | length > 0)
+            and (.barWidget.description | length > 0)
+            and (.barWidget.category | length > 0)
+            and (.barWidget.allowMultiple | type) == "boolean"
+            and (.barWidget.defaultSection | IN("left", "center", "right"))
+          ' manifest.json > /dev/null
+
+      - name: manifest schema entries are well formed
+        run: |
+          jq -e '.barWidget.schema | type == "array" and length > 0 and all(
+            (.key | type) == "string" and (.key | length > 0)
+            and (.type | type) == "string"
+            and (.label | type) == "string"
+          )' manifest.json > /dev/null
+          # The widget reads exactly one setting; keep the manifest honest
+          # about it so the shell's settings form matches the code.
+          jq -e '[.barWidget.schema[].key] == ["dataFile"]' manifest.json > /dev/null
+          grep -q 'setting("dataFile"' Widget.qml
+
+      - name: barWidget entry point and licence exist
+        run: |
+          test -f "$(jq -r .entryPoints.barWidget manifest.json)"
+          test -f LICENSE
+          test -f README.md
+
+      - name: no hardcoded colors in Widget.qml
+        run: |
+          # Every color has to come from Color / Style / bar.foreground so a
+          # theme switch repaints the widget live. A literal is a color that
+          # stops following the theme.
+          ! grep -nE '#[0-9A-Fa-f]{3,8}' Widget.qml
+          ! grep -nEi ':[[:space:]]*"(white|black|red|green|blue|gray|grey)"' Widget.qml
+
+      - name: bin/dashboard is executable and passes shellcheck
+        run: |
+          test -x bin/dashboard
+          shellcheck bin/dashboard
+
+      - name: bin/dashboard usage contract
+        run: |
+          ./bin/dashboard --help | grep -q 'Usage: dashboard'
+          test "$(./bin/dashboard 2>/dev/null; echo $?)" = 2
+          test "$(./bin/dashboard nosuchcommand 2>/dev/null; echo $?)" = 2
+
+      - name: list seeds a valid file and save round-trips
+        run: |
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/config"
+          file="$XDG_CONFIG_HOME/omarchy/dashboard/services.json"
+
+          # First run creates the file with a usable example list.
+          ./bin/dashboard list | jq -e 'type == "array" and length > 0' > /dev/null
+          test -f "$file"
+          # Same shape the widget and the README promise.
+          jq -e 'all(
+            (.id | type) == "string" and (.id | length > 0)
+            and (.name | type) == "string" and (.name | length > 0)
+            and (.url | type) == "string" and (.url | test("^https?://"))
+            and (.icon | type) == "string"
+          )' "$file" > /dev/null
+          # Pretty-printed, because it is documented as hand-editable.
+          test "$(wc -l < "$file")" -gt 1
+
+          ./bin/dashboard save '[{"id":"a","name":"Proxmox","url":"https://pve.local:8006","icon":"proxmox.svg"}]'
+          test "$(./bin/dashboard list | jq -r '.[0].name')" = "Proxmox"
+          ./bin/dashboard path | grep -q 'services.json'
+
+          # --file targets somewhere else entirely, including a directory that
+          # does not exist yet.
+          alt="$RUNNER_TEMP/alt/nested/other.json"
+          ./bin/dashboard --file "$alt" list | jq -e 'length > 0' > /dev/null
+          test -f "$alt"
+
+      - name: malformed payloads are rejected and leave the file intact
+        run: |
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/config"
+          file="$XDG_CONFIG_HOME/omarchy/dashboard/services.json"
+          before="$(cat "$file")"
+
+          ! ./bin/dashboard save 'not json' 2>/dev/null
+          ! ./bin/dashboard save '{"id":"a"}' 2>/dev/null                       # not an array
+          ! ./bin/dashboard save '[{"id":"a","url":"x"}]' 2>/dev/null           # no name
+          ! ./bin/dashboard save '[{"id":"a","name":"A"}]' 2>/dev/null          # no url
+          ! ./bin/dashboard save '[{"name":"A","url":"x"}]' 2>/dev/null         # no id
+          ! ./bin/dashboard save '[{"id":"a","name":"A","url":"x"},{"id":"a","name":"B","url":"y"}]' 2>/dev/null
+          ! ./bin/dashboard save '' 2>/dev/null
+
+          test "$(cat "$file")" = "$before"
+          # An interrupted or rejected write must not leave debris next to it.
+          test -z "$(find "$(dirname "$file")" -name '.services.json.*' -print -quit)"
+
+      - name: a hand-mangled file is reported, never silently replaced
+        run: |
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/broken"
+          mkdir -p "$XDG_CONFIG_HOME/omarchy/dashboard"
+          file="$XDG_CONFIG_HOME/omarchy/dashboard/services.json"
+          printf 'garbage{' > "$file"
+          ! ./bin/dashboard list 2>/dev/null
+          test "$(cat "$file")" = 'garbage{'
+
+      - name: icon names are whitelisted, not escaped
+        run: |
+          export XDG_CACHE_HOME="$RUNNER_TEMP/cache"
+          # Anything with a path component is refused outright, so the cache
+          # path can never be steered out of its directory.
+          ! ./bin/dashboard icon '../../../etc/passwd' 2>/dev/null
+          ! ./bin/dashboard icon '..' 2>/dev/null
+          ! ./bin/dashboard icon '/etc/passwd' 2>/dev/null
+          ! ./bin/dashboard icon 'a/b.svg' 2>/dev/null
+          ! ./bin/dashboard icon '' 2>/dev/null
+          ! ./bin/dashboard icon 'has space.svg' 2>/dev/null
+          ! ./bin/dashboard icon '$(id).svg' 2>/dev/null
+          ! ./bin/dashboard icon 'a;b.svg' 2>/dev/null
+          ! ./bin/dashboard icon '.hidden.svg' 2>/dev/null
+          # Invalid names still produce a well-formed batch result so the
+          # widget can draw its fallback glyph without special-casing them.
+          ./bin/dashboard icons '../../../etc/passwd' 'has space.svg' \
+            | jq -e 'to_entries | all(.value == "")' > /dev/null
+          test -z "$(find "$RUNNER_TEMP/cache" -name 'passwd*' 2>/dev/null)"
+
+      - name: pasted icon URLs are validated
+        run: |
+          export XDG_CACHE_HOME="$RUNNER_TEMP/urlcache"
+          # https only, ending in a known image suffix, no traversal segment.
+          # The host is deliberately unrestricted — self-hosted icon sets are a
+          # supported case — so these three rules are the whole guard.
+          ! ./bin/dashboard icon 'http://host/i.svg' 2>/dev/null
+          ! ./bin/dashboard icon 'ftp://host/i.svg' 2>/dev/null
+          ! ./bin/dashboard icon 'file:///etc/passwd.svg' 2>/dev/null
+          ! ./bin/dashboard icon 'javascript:alert(1).svg' 2>/dev/null
+          ! ./bin/dashboard icon 'https://host/../../etc/passwd' 2>/dev/null
+          ! ./bin/dashboard icon 'https://host/icons/../../../etc/passwd.svg' 2>/dev/null
+          ! ./bin/dashboard icon 'https://host/a/../b.svg' 2>/dev/null
+          ! ./bin/dashboard icon 'https://host/icon.exe' 2>/dev/null
+          ! ./bin/dashboard icon 'https://host/icon.svg?x=1' 2>/dev/null
+          ! ./bin/dashboard icon 'https://host/icon.svg#f' 2>/dev/null
+          ! ./bin/dashboard icon 'https://host/$(id).svg' 2>/dev/null
+          ! ./bin/dashboard icon 'https://host/a b.svg' 2>/dev/null
+          ! ./bin/dashboard icon 'https://host/' 2>/dev/null
+          ! ./bin/dashboard icon 'https://.svg' 2>/dev/null
+          # A well-formed URL to a host that isn't there is a miss (exit 3),
+          # not a rejection (exit 1) — the shape is fine, the fetch failed.
+          ./bin/dashboard icon 'https://localhost:1/icon.svg' > /dev/null 2>&1 || test $? = 3
+
+      - name: the widget and the helper agree on what an icon may be
+        run: |
+          # Widget.qml validates the icon field inline so a bad paste is named
+          # rather than silently becoming a fallback glyph. Two copies of a rule
+          # drift; assert the QML still carries the same three clauses.
+          grep -q 'isValidIconUrl' Widget.qml
+          grep -q 'svg|png|webp' Widget.qml
+          grep -q 'indexOf("\.\.")' Widget.qml
+          grep -q '\^https:' Widget.qml
+
+      - name: bare names try both collections, in order
+        run: |
+          export XDG_CACHE_HOME="$RUNNER_TEMP/icons"
+          cache="$(./bin/dashboard cache-dir)"
+          hash_of() { printf '%s' "$1" | sha256sum | cut -c1-40; }
+
+          # An empty batch is still valid JSON.
+          test "$(./bin/dashboard icons | jq -c .)" = "{}"
+
+          homarr="https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg"
+          selfhst="https://cdn.jsdelivr.net/gh/selfhst/icons/svg"
+
+          if curl -fsL --max-time 20 -o /dev/null "$homarr/plex.svg" \
+            && curl -fsL --max-time 20 -o /dev/null "$selfhst/arr-dashboard.svg"; then
+
+            # `plex` is in BOTH collections, so it is the order test: it has to
+            # come back as the dashboardicons.com file, not the selfh.st one.
+            plex="$(./bin/dashboard icon plex)"
+            test "$plex" = "$cache/$(hash_of "$homarr/plex.svg").svg"
+            test "$plex" != "$cache/$(hash_of "$selfhst/plex.svg").svg"
+            head -c 2048 "$plex" | grep -qi '<svg'
+
+            # `arr-dashboard` is selfh.st-only, so it proves the second source
+            # is reached after the first 404s.
+            arr="$(./bin/dashboard icon arr-dashboard)"
+            test "$arr" = "$cache/$(hash_of "$selfhst/arr-dashboard.svg").svg"
+            head -c 2048 "$arr" | grep -qi '<svg'
+
+            # Spelling variants of a name share one cache entry.
+            test "$(./bin/dashboard icon plex.svg)" = "$plex"
+            test "$(./bin/dashboard icon Plex.SVG)" = "$plex"
+
+            # A pasted URL resolves, and resolves to the file that URL names.
+            pasted="$(./bin/dashboard icon "$selfhst/arr-dashboard.svg")"
+            test "$pasted" = "$arr"
+
+            # Cache keys must not collide: a bare name and a pasted URL sharing
+            # a basename are two different files.
+            other="$(./bin/dashboard icon "$selfhst/plex.svg")"
+            test "$other" != "$plex"
+            test -s "$other"
+            test -s "$plex"
+
+            ./bin/dashboard icons plex arr-dashboard "$selfhst/plex.svg" \
+              | jq -e --arg a "$plex" --arg b "$arr" --arg c "$other" \
+                --arg k "$selfhst/plex.svg" \
+                '.["plex"] == $a and .["arr-dashboard"] == $b and .[$k] == $c' > /dev/null
+          else
+            echo "CDN unreachable — skipping the fetch-succeeds checks"
+          fi
+
+      - name: an explicit extension picks that format, not svg
+        run: |
+          export XDG_CACHE_HOME="$RUNNER_TEMP/icons-ext"
+          cache="$(./bin/dashboard cache-dir)"
+          hash_of() { printf '%s' "$1" | sha256sum | cut -c1-40; }
+          selfhst="https://cdn.jsdelivr.net/gh/selfhst/icons"
+
+          if curl -fsL --max-time 20 -o /dev/null "$selfhst/png/arr-dashboard.png"; then
+            # The regression this guards: `.svg` used to be appended
+            # unconditionally, so `arr-dashboard.png` became the nonexistent
+            # `arr-dashboard.png.svg` and fell back to the glyph. The extension
+            # selects the collection's per-format directory as well as the
+            # suffix, so this must resolve to the PNG the user asked for.
+            png="$(./bin/dashboard icon arr-dashboard.png)"
+            test "$png" = "$cache/$(hash_of "$selfhst/png/arr-dashboard.png").png"
+            printf '\x89PNG' | cmp -n 4 - "$png"
+
+            webp="$(./bin/dashboard icon arr-dashboard.webp)"
+            test "$webp" = "$cache/$(hash_of "$selfhst/webp/arr-dashboard.webp").webp"
+            head -c 16 "$webp" | grep -qa 'WEBP'
+
+            # Same name, three formats, three distinct cache entries.
+            svg="$(./bin/dashboard icon arr-dashboard)"
+            test "$svg" != "$png"
+            test "$png" != "$webp"
+          else
+            echo "CDN unreachable — skipping the format checks"
+          fi
+
+      - name: a name in neither collection misses once and stays missed
+        run: |
+          export XDG_CACHE_HOME="$RUNNER_TEMP/misses"
+          cache="$(./bin/dashboard cache-dir)"
+          misses="$RUNNER_TEMP/misses/omarchy/dashboard/icon-misses"
+
+          if ./bin/dashboard icon zz-in-neither-collection > /dev/null 2>&1; then
+            echo "expected a miss for a name no collection has"; exit 1
+          fi
+          # Exactly one marker: a 404 from the first collection is a step on the
+          # way to the second, not a miss of its own.
+          test "$(find "$misses" -type f | wc -l)" = "1"
+          # Second call is served from the negative cache; it still misses.
+          ! ./bin/dashboard icon zz-in-neither-collection > /dev/null 2>&1
+          # Spelling variants share the marker rather than adding their own.
+          ! ./bin/dashboard icon zz-in-neither-collection.svg > /dev/null 2>&1
+          ! ./bin/dashboard icon ZZ-In-Neither-Collection.SVG > /dev/null 2>&1
+          test "$(find "$misses" -type f | wc -l)" = "1"
+
+          ./bin/dashboard clear-cache
+          test ! -d "$cache"
+          test ! -d "$misses"

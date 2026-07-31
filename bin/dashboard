@@ -1,0 +1,562 @@
+#!/usr/bin/env bash
+
+# Backing store and icon cache for the Omarchy dashboard bar plugin. The widget
+# shells out to this script for every read and write so that no network or disk
+# work ever happens on the QML thread — Quickshell's Process is asynchronous,
+# a FileView write or an Image fetching over https is not.
+
+set -euo pipefail
+
+export LC_ALL=C
+
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+
+# Services live outside the plugin checkout on purpose. `omarchy plugin update`
+# is a git fast-forward of this repository; anything stored inside it would be
+# a merge conflict at best and silently reverted user data at worst.
+DEFAULT_DATA_FILE="$CONFIG_HOME/omarchy/dashboard/services.json"
+DATA_FILE=""
+
+ICON_CACHE_DIR="$CACHE_HOME/omarchy/dashboard/icons"
+# Misses are recorded as empty marker files next to the cache rather than in it,
+# so a miss can never be mistaken for a zero-byte icon.
+ICON_MISS_DIR="$CACHE_HOME/omarchy/dashboard/icon-misses"
+
+# The two icon collections a bare name is looked up in, most preferred first.
+# They are separate projects with separate name sets: dashboardicons.com is
+# homarr-labs/dashboard-icons, selfh.st/icons is selfhst/icons, and plenty of
+# services appear in one but not the other (`arr-dashboard` is selfhst-only).
+# Both publish the same jsDelivr layout, so one loop covers them.
+#
+# Order matters and is deliberate: dashboardicons.com stays primary, so a name
+# carried by both collections resolves to the homarr-labs artwork.
+#
+# These are repository roots, not directories: both collections file an icon
+# under a directory named for its own format (`svg/plex.svg`, `png/plex.png`),
+# so the extension the user typed picks the directory as well as the suffix.
+ICON_SOURCES=(
+  "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons"
+  "https://cdn.jsdelivr.net/gh/selfhst/icons"
+)
+
+# A name that 404s today may exist next month, so misses expire. Long enough
+# that a typo costs one request per day, short enough that a genuinely new icon
+# turns up without the user knowing this cache exists.
+MISS_TTL_SECONDS="${OMARCHY_DASHBOARD_ICON_MISS_TTL:-86400}"
+FETCH_TIMEOUT="${OMARCHY_DASHBOARD_ICON_TIMEOUT:-6}"
+
+REFRESH=0
+
+die() {
+  printf 'dashboard: %s\n' "$1" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: dashboard [--file PATH] <command> [args]
+
+Commands:
+  list                     Print the service list as JSON, seeding the file on
+                           first run. Exits non-zero if the file is malformed.
+  save JSON                Validate JSON and write it to the data file
+                           atomically (temp file + mv).
+  icon ICON                Print the cached path for one icon, fetching it if
+                           needed. Exits 3 when no source has it.
+  icons [--refresh] ICON.. Resolve several icons at once (fetched in parallel)
+                           and print a JSON object of icon -> path. A missing
+                           icon maps to "" so the widget can draw its fallback
+                           glyph without a second round trip.
+  path                     Print the resolved data file path.
+  cache-dir                Print the icon cache directory.
+  clear-cache              Delete every cached icon and miss marker.
+  --help, -h               This message.
+
+An ICON is either a name or a URL:
+  plex, plex.svg           A name is looked up in each collection in turn —
+                           dashboardicons.com (homarr-labs/dashboard-icons)
+                           first, then selfh.st/icons (selfhst/icons). Names are
+                           lowercased and .svg is added when missing.
+  https://host/icon.svg    A full URL, as "copy link address" on either site
+                           gives you, is fetched exactly as written. https only,
+                           ending in .svg, .png, or .webp. Any host is allowed.
+
+Options:
+  --file PATH              Data file to read/write. Defaults to
+                           $XDG_CONFIG_HOME/omarchy/dashboard/services.json.
+  --refresh                (icon/icons) Ignore the negative cache and retry the
+                           fetch. Cached icons are still reused.
+
+Environment:
+  OMARCHY_DASHBOARD_ICON_MISS_TTL   Seconds a miss stays cached (default 86400).
+  OMARCHY_DASHBOARD_ICON_TIMEOUT    curl --max-time per icon (default 6).
+EOF
+}
+
+# Accept `~/...` because the dataFile setting is hand-typed into shell.json,
+# where a literal tilde is the obvious thing to write and nothing expands it.
+expand_path() {
+  local path=$1
+  # SC2088 warns about tildes that don't expand — here that is the point: these
+  # are patterns matching a literal `~` the shell never got a chance to expand,
+  # and $HOME is substituted by hand below.
+  # shellcheck disable=SC2088
+  case $path in
+    "~") printf '%s' "$HOME" ;;
+    "~/"*) printf '%s' "$HOME/${path#\~/}" ;;
+    *) printf '%s' "$path" ;;
+  esac
+}
+
+data_file() {
+  if [[ -n $DATA_FILE ]]; then
+    expand_path "$DATA_FILE"
+  else
+    printf '%s' "$DEFAULT_DATA_FILE"
+  fi
+}
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || die "jq not found — install jq"
+}
+
+# The list a fresh install starts with: enough to show what the fields mean and
+# what an icon name looks like, few enough that clearing them out is quick.
+seed_json() {
+  cat <<'EOF'
+[
+  {
+    "id": "seed-router",
+    "name": "Router",
+    "url": "http://192.168.1.1",
+    "icon": "router.svg"
+  },
+  {
+    "id": "seed-home-assistant",
+    "name": "Home Assistant",
+    "url": "http://homeassistant.local:8123",
+    "icon": "home-assistant.svg"
+  },
+  {
+    "id": "seed-jellyfin",
+    "name": "Jellyfin",
+    "url": "http://jellyfin.local:8096",
+    "icon": "jellyfin.svg"
+  }
+]
+EOF
+}
+
+# Shape check shared by `list` and `save`. Runs before a write so a bad payload
+# is rejected while the previous file is still intact, and after a read so a
+# hand-edited file fails with a message instead of feeding the widget garbage.
+valid_services_filter='
+  type == "array"
+  and all(.[];
+    type == "object"
+    and (.id | type) == "string" and (.id | length > 0)
+    and (.name | type) == "string" and (.name | length > 0)
+    and (.url | type) == "string" and (.url | length > 0)
+    and ((has("icon") | not) or .icon == null or (.icon | type) == "string"))
+  and ([.[].id] | length == (unique | length))
+'
+
+list_services() {
+  require_jq
+  local file
+  file="$(data_file)"
+
+  if [[ ! -f $file ]]; then
+    mkdir -p "$(dirname "$file")" || die "could not create $(dirname "$file")"
+    seed_json >"$file" || die "could not write $file"
+  fi
+
+  jq -e "$valid_services_filter" "$file" >/dev/null 2>&1 \
+    || die "malformed service file: $file"
+
+  jq '.' "$file"
+}
+
+save_services() {
+  require_jq
+  local json=${1-}
+  [[ -n $json ]] || die "save needs a JSON payload"
+
+  printf '%s' "$json" | jq -e "$valid_services_filter" >/dev/null 2>&1 \
+    || die "refusing to save malformed service list"
+
+  local file dir tmp
+  file="$(data_file)"
+  dir="$(dirname "$file")"
+  mkdir -p "$dir" || die "could not create $dir"
+
+  # Same directory so the mv is a rename within one filesystem, which is what
+  # makes it atomic: readers see either the old file or the new one, never a
+  # half-written one.
+  tmp="$(mktemp "$dir/.services.json.XXXXXX")" || die "could not create a temp file in $dir"
+  # Pretty-printed with a trailing newline: this file is documented as
+  # hand-editable, and `jq .` output is what a human would have typed anyway.
+  if ! printf '%s' "$json" | jq '.' >"$tmp"; then
+    rm -f "$tmp"
+    die "could not write $tmp"
+  fi
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; die "could not replace $file"; }
+}
+
+# Normalise a user-typed icon name into a cache filename and URL segment.
+#
+# This is the only thing standing between "whatever the user typed into a text
+# field" and both a path under the cache directory and a URL, so it is a
+# whitelist, not an escaper. Anything carrying a path component is rejected
+# outright rather than stripped: silently turning `../../etc/passwd` into
+# `passwd.svg` would be safe but would also quietly render whatever icon that
+# name happens to resolve to, which is worse than saying no. A leading dot is
+# rejected for the same reason `..` is. Names are lowercased because the
+# upstream icon repository is entirely lowercase, so "Plex.svg" should work.
+#
+# An extension the collections actually publish is kept rather than overwritten:
+# `arr-dashboard.png` asks for the PNG, and blindly appending `.svg` to it
+# produced `arr-dashboard.png.svg`, which exists nowhere. A bare name still
+# means SVG, which is what the icon sites hand out by default.
+icon_key() {
+  local raw=${1-}
+  [[ $raw == */* || $raw == *\\* ]] && return 1
+  raw=${raw,,}
+  [[ -n $raw ]] || return 1
+  case $raw in
+    *.svg | *.png | *.webp) ;;
+    *) raw="$raw.svg" ;;
+  esac
+  [[ $raw =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  [[ $raw == .* ]] && return 1
+  printf '%s' "$raw"
+}
+
+# Validate a pasted icon URL.
+#
+# Both icon sites offer "copy link address" on every icon, and that is how
+# people actually use them, so a full URL is a first-class value in the icon
+# field. The host is deliberately NOT restricted — self-hosting an icon set is
+# a reasonable thing for this audience to do — which makes the rest of the
+# check the whole of the guard:
+#
+#   https only     an icon is not worth a plaintext request, and it keeps
+#                  `file://`, `javascript:` and friends out by construction
+#   no `..`        a traversal segment has no business in an icon URL, and
+#                  honouring one means fetching something other than what was
+#                  pasted (the cache path is a hash, so this is about the
+#                  request, not about escaping the cache directory)
+#   known suffix   the URL must end in .svg/.png/.webp, so the extension the
+#                  cache file is given is the one the server was asked for
+#
+# Matching is done on a lowercased copy purely to fold the extension and scheme;
+# every character in the whitelist below has the same class either way, so this
+# does not widen what the original may contain.
+valid_icon_url() {
+  local url=${1-}
+  [[ $url == *".."* ]] && return 1
+  local lower=${url,,}
+  [[ $lower =~ ^https://[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._~%@/+-]*\.(svg|png|webp)$ ]] || return 1
+  return 0
+}
+
+# The extension a URL's cache entry should carry.
+url_extension() {
+  local lower=${1,,}
+  case $lower in
+    *.svg) printf 'svg' ;;
+    *.png) printf 'png' ;;
+    *.webp) printf 'webp' ;;
+    *) return 1 ;;
+  esac
+}
+
+require_hash() {
+  command -v sha256sum >/dev/null 2>&1 || die "sha256sum not found — install coreutils"
+}
+
+hash_key() {
+  printf '%s' "${1-}" | sha256sum | cut -c1-40
+}
+
+# Every URL an icon spec could be served from, most preferred first. A bare name
+# fans out across the collections; a pasted URL is itself, verbatim. Returns
+# non-zero for anything that is neither.
+icon_candidates() {
+  local spec=${1-}
+
+  if [[ $spec == https://* ]]; then
+    valid_icon_url "$spec" || return 1
+    printf '%s\n' "$spec"
+    return 0
+  fi
+
+  # A scheme we don't serve is a mistake worth naming, not a filename.
+  [[ $spec == *"://"* ]] && return 1
+
+  local key
+  key="$(icon_key "$spec")" || return 1
+
+  # The extension doubles as the directory in both collections.
+  local ext
+  ext="$(url_extension "$key")" || return 1
+
+  local base
+  for base in "${ICON_SOURCES[@]}"; do
+    printf '%s/%s/%s\n' "$base" "$ext" "$key"
+  done
+}
+
+# Where a given URL's bytes live.
+#
+# Keyed on a hash of the resolved URL, not on what the user typed. Two
+# collections publish plenty of the same file names, and a pasted URL can end in
+# any basename at all, so a name-keyed cache would let a selfhst icon overwrite
+# the homarr-labs one — or a self-hosted `plex.svg` overwrite both. The
+# extension is kept so the file is still recognisable in the cache directory.
+cache_path_for_url() {
+  local url=$1 ext
+  ext="$(url_extension "$url")" || ext="svg"
+  printf '%s/%s.%s' "$ICON_CACHE_DIR" "$(hash_key "$url")" "$ext"
+}
+
+# Misses are recorded per spec rather than per URL: the question a marker
+# answers is "did every source fail for this?", which is only meaningful for the
+# thing the user actually typed. Hashed so an arbitrary pasted URL is a legal
+# file name.
+miss_marker_for_spec() {
+  local spec=$1 id
+  if [[ $spec == https://* ]]; then
+    id=$spec
+  else
+    # Normalised, so `plex`, `plex.svg` and `Plex.SVG` share one marker.
+    id="$(icon_key "$spec")" || id=$spec
+  fi
+  printf '%s/%s' "$ICON_MISS_DIR" "$(hash_key "$id")"
+}
+
+miss_is_fresh() {
+  local marker=$1 mtime now
+  [[ -f $marker ]] || return 1
+  (( MISS_TTL_SECONDS > 0 )) || return 1
+  mtime="$(stat -c %Y "$marker" 2>/dev/null || printf '0')"
+  now="$(date +%s)"
+  (( now - mtime <= MISS_TTL_SECONDS ))
+}
+
+# The body a URL returned has to look like the thing its extension claims. -f
+# already turns a 404 into a failure; this catches the other way a fetch can
+# "succeed" with junk — a captive portal or proxy answering 200 with HTML.
+body_matches_extension() {
+  local file=$1 ext=$2
+  case $ext in
+    # 2KB rather than a few hundred bytes: a licence comment ahead of the root
+    # element is common, and truncating into one would reject a valid icon.
+    svg)  head -c 2048 "$file" | grep -qi '<svg' ;;
+    png)  head -c 8 "$file" | grep -qa 'PNG' ;;
+    webp) head -c 16 "$file" | grep -qa 'WEBP' ;;
+    *)    return 1 ;;
+  esac
+}
+
+# Fetch one URL into its cache slot. Prints nothing; returns 0 when the bytes
+# are on disk afterwards.
+download_icon() {
+  local url=$1 dest ext tmp
+  dest="$(cache_path_for_url "$url")"
+  ext="${dest##*.}"
+
+  mkdir -p "$ICON_CACHE_DIR" || return 1
+  tmp="$(mktemp "$ICON_CACHE_DIR/.fetch.XXXXXX")" || return 1
+
+  # -s without -S on purpose. A 404 is the expected outcome for a name that
+  # doesn't exist in a given collection — with two sources it is now the
+  # expected outcome for the *first* source of a perfectly good icon — and it is
+  # handled by the caller. Letting curl narrate it on stderr would put
+  # "curl: (22)" in front of a user who only ever typed an icon name, and
+  # pollute the widget's stderr collector.
+  if curl -fsL --max-time "$FETCH_TIMEOUT" -o "$tmp" "$url" \
+    && [[ -s $tmp ]] \
+    && body_matches_extension "$tmp" "$ext"; then
+    mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+    return 0
+  fi
+
+  rm -f "$tmp"
+  return 1
+}
+
+# Cache-only lookup: the first candidate already on disk, in source order.
+# Never touches the network, so it is safe to call after a parallel warm-up
+# without re-fetching anything (including under --refresh).
+lookup_icon_cached() {
+  local spec=${1-}
+  local -a candidates=()
+  mapfile -t candidates < <(icon_candidates "$spec")
+  (( ${#candidates[@]} > 0 )) || return 1
+
+  local url path
+  for url in "${candidates[@]}"; do
+    path="$(cache_path_for_url "$url")"
+    if [[ -s $path ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Resolve one icon spec to a cached path, fetching as needed.
+#   0  printed a path
+#   1  every source missed
+#   2  the spec isn't a usable name or URL
+resolve_icon() {
+  local spec=${1-}
+  local -a candidates=()
+  mapfile -t candidates < <(icon_candidates "$spec")
+  (( ${#candidates[@]} > 0 )) || return 2
+
+  local cached
+  if cached="$(lookup_icon_cached "$spec")"; then
+    printf '%s\n' "$cached"
+    return 0
+  fi
+
+  local marker
+  marker="$(miss_marker_for_spec "$spec")"
+  if (( REFRESH == 0 )) && miss_is_fresh "$marker"; then
+    return 1
+  fi
+
+  mkdir -p "$ICON_CACHE_DIR" "$ICON_MISS_DIR" || return 1
+
+  local url
+  for url in "${candidates[@]}"; do
+    if download_icon "$url"; then
+      rm -f "$marker"
+      cache_path_for_url "$url"
+      printf '\n'
+      return 0
+    fi
+  done
+
+  # Only once every source has failed — a 404 from the first collection is a
+  # routine step on the way to a hit in the second, not a miss.
+  : >"$marker" 2>/dev/null || true
+  return 1
+}
+
+# Resolve one icon, printing its cached path. Exit 3 means "no such icon" and is
+# kept distinct from exit 1 (an error) and exit 2 (bad usage).
+icon_path() {
+  require_hash
+  local raw=${1-}
+  local status=0
+  resolve_icon "$raw" || status=$?
+  case $status in
+    0) return 0 ;;
+    2) die "invalid icon name or URL: $raw" ;;
+    *) return 3 ;;
+  esac
+}
+
+# Resolve many icon specs at once and print { "<spec as typed>": "<path or empty>" }.
+#
+# The widget calls this once per list load rather than once per row, and the
+# fetches run in parallel so a panel with ten uncached icons waits for the
+# slowest single request instead of the sum of all of them. With two
+# collections that matters more than it did with one: a selfhst-only icon costs
+# a 404 and then a hit, serially, inside its own job.
+icons_json() {
+  require_jq
+  require_hash
+  (( $# > 0 )) || { printf '{}\n'; return 0; }
+
+  local -a specs=() pids=()
+  local spec seen=$'\n'
+
+  for spec in "$@"; do
+    specs+=("$spec")
+    # One job per distinct spec even when several services share an icon.
+    # Newline-delimited because a spec may contain almost anything.
+    if [[ $seen != *$'\n'"$spec"$'\n'* ]]; then
+      seen+="$spec"$'\n'
+      if ! lookup_icon_cached "$spec" >/dev/null 2>&1; then
+        resolve_icon "$spec" >/dev/null 2>&1 &
+        pids+=("$!")
+      fi
+    fi
+  done
+
+  # A failed fetch is an expected outcome, not a script error, so each wait is
+  # allowed to report non-zero without tripping `set -e`.
+  local pid
+  for pid in ${pids[@]+"${pids[@]}"}; do
+    wait "$pid" || true
+  done
+
+  # Cache-only second pass. Re-running resolve_icon here would re-fetch every
+  # spec that just missed when --refresh is set, since the marker the background
+  # job wrote is exactly what --refresh ignores.
+  local path
+  for spec in "${specs[@]}"; do
+    path="$(lookup_icon_cached "$spec" 2>/dev/null || true)"
+    # Built through jq rather than string concatenation: the key is whatever the
+    # user typed, and quotes or backslashes in it would otherwise break the JSON.
+    jq -n --arg name "$spec" --arg path "$path" '{ name: $name, path: $path }'
+  done | jq -s 'map({ (.name): .path }) | add // {}'
+}
+
+clear_cache() {
+  rm -rf "$ICON_CACHE_DIR" "$ICON_MISS_DIR"
+}
+
+while (( $# > 0 )); do
+  case $1 in
+    --file)
+      [[ $# -ge 2 ]] || die "--file needs a path"
+      DATA_FILE=$2
+      shift 2
+      ;;
+    --file=*)
+      DATA_FILE=${1#--file=}
+      shift
+      ;;
+    --refresh)
+      REFRESH=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+# `--refresh` reads naturally after the subcommand too (`icons --refresh plex`),
+# which is how the widget and the docs spell it, so both spellings are accepted.
+case ${1:-} in
+  list)        list_services ;;
+  save)        shift; save_services "${1-}" ;;
+  icon)
+    shift
+    while [[ ${1-} == --refresh ]]; do REFRESH=1; shift; done
+    icon_path "${1-}"
+    ;;
+  icons)
+    shift
+    while [[ ${1-} == --refresh ]]; do REFRESH=1; shift; done
+    icons_json "$@"
+    ;;
+  path)        data_file; printf '\n' ;;
+  cache-dir)   printf '%s\n' "$ICON_CACHE_DIR" ;;
+  clear-cache) clear_cache ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

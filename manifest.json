@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "perfektnacht.dashboard-plugin",
+  "name": "Dashboard",
+  "version": "1.0.0",
+  "author": "perfektnacht",
+  "license": "MIT",
+  "description": "Links to the services on your network, with icons, editable from the bar.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Dashboard",
+    "description": "A searchable list of self-hosted services. Click one to open it in the default browser; add, edit, and delete them from the panel.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "schema": [
+      {
+        "key": "dataFile",
+        "type": "string",
+        "label": "Service file",
+        "description": "Where the service list is stored. Defaults to ~/.config/omarchy/dashboard/services.json, outside the plugin checkout so updates never touch it."
+      }
+    ]
+  }
+}
