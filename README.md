@@ -55,6 +55,11 @@ It stays pretty-printed and hand-editable. The plugin validates it on every
 read: a malformed file is reported in the panel rather than quietly replaced,
 so a bad edit never costs you the list.
 
+Because it lives outside the checkout, **this file outlives the plugin.**
+Uninstalling, reinstalling, or deleting the plugin directory leaves it alone —
+see [Removing the plugin does not remove your
+services](#removing-the-plugin-does-not-remove-your-services).
+
 To keep it somewhere else, set `dataFile` on the widget's entry in
 `~/.config/omarchy/shell.json`:
 
@@ -182,9 +187,43 @@ This disables the plugin and deletes its directory, prompting first:
 omarchy plugin remove perfektnacht.dashboard-plugin
 ```
 
-`~/.config/omarchy/dashboard/services.json` and the icon cache survive, so
-reinstalling picks up where you left off. Delete them yourself if you don't want
-that.
+### Removing the plugin does not remove your services
+
+`omarchy plugin remove` deletes the *code*. Your service list is not in the
+plugin directory and never was, so it survives — as does the icon cache.
+Reinstalling picks up exactly where you left off.
+
+That is the point of storing it outside the checkout, but it inverts the usual
+expectation, so it is worth being explicit: **reinstalling is not a reset.**
+Nothing you do to the plugin directory clears your data, including these, all of
+which look like they should and don't:
+
+| What you might try | Why it doesn't clear anything |
+| ------------------ | ----------------------------- |
+| `omarchy plugin remove` then reinstall | Removes the code. The data is elsewhere. |
+| Deleting `~/.config/omarchy/plugins/perfektnacht.dashboard-plugin/` | Same — that directory holds no service data. |
+| Deleting the `.perfektnacht.dashboard-plugin.bak.<timestamp>` directory | `omarchy plugin add` moves an existing install aside to that hidden backup before cloning. It is a copy of the **code only**. Deleting it is harmless and reclaims nothing but the code. |
+| Reinstalling from a different clone or a fresh git URL | `dataFile` resolves to the same path regardless of where the code came from. |
+
+There is exactly one place to look, and deleting it is the reset:
+
+```bash
+# Back it up first — this is the only copy of your list.
+mv ~/.config/omarchy/dashboard ~/dashboard-services.bak
+
+# Or, if you really mean it:
+rm -rf ~/.config/omarchy/dashboard
+```
+
+The next time the panel opens it recreates the directory and reseeds the three
+examples, exactly as on a first install. If you set `dataFile`, clear that path
+instead — the default above is no longer the one in use.
+
+The icon cache is separate and safe to delete at any time; it refetches.
+
+```bash
+~/.config/omarchy/plugins/perfektnacht.dashboard-plugin/bin/dashboard clear-cache
+```
 
 Omarchy shell plugins run unsandboxed inside the shell process — read the source
 of this one (and any other) before you enable it.
