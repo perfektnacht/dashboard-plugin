@@ -46,6 +46,17 @@ ICON_SOURCES=(
 MISS_TTL_SECONDS="${OMARCHY_DASHBOARD_ICON_MISS_TTL:-86400}"
 FETCH_TIMEOUT="${OMARCHY_DASHBOARD_ICON_TIMEOUT:-6}"
 
+# How long a service gets to answer before it counts as down. The whole sweep
+# runs in parallel, so this is the worst case for the panel, not per service.
+# An unresolvable `.local` name burns the full budget in DNS alone, which is
+# why this is shorter than the icon timeout: a stale hostname is the common
+# case in a homelab, and it shouldn't hold the dots grey for six seconds.
+STATUS_TIMEOUT="${OMARCHY_DASHBOARD_STATUS_TIMEOUT:-4}"
+
+# Panel preferences that the widget itself writes. Kept to a whitelist so a
+# typo in `set-pref` is an error rather than a key nothing will ever read.
+PREF_KEYS=("checkStatus" "pollStatus")
+
 REFRESH=0
 
 die() {
@@ -68,6 +79,11 @@ Commands:
                            and print a JSON object of icon -> path. A missing
                            icon maps to "" so the widget can draw its fallback
                            glyph without a second round trip.
+  status URL..             Check which services answer, in parallel, and print
+                           a JSON object of url -> "up" | "down".
+  prefs                    Print the panel preferences as JSON.
+  set-pref KEY true|false  Set one panel preference. Keys: checkStatus,
+                           pollStatus.
   path                     Print the resolved data file path.
   cache-dir                Print the icon cache directory.
   clear-cache              Delete every cached icon and miss marker.
@@ -91,6 +107,7 @@ Options:
 Environment:
   OMARCHY_DASHBOARD_ICON_MISS_TTL   Seconds a miss stays cached (default 86400).
   OMARCHY_DASHBOARD_ICON_TIMEOUT    curl --max-time per icon (default 6).
+  OMARCHY_DASHBOARD_STATUS_TIMEOUT  curl --max-time per service (default 4).
 EOF
 }
 
@@ -512,6 +529,133 @@ clear_cache() {
   rm -rf "$ICON_CACHE_DIR" "$ICON_MISS_DIR"
 }
 
+# ------------------------------------------------------------------- status
+
+# Ask one service whether it is there, and write "up" or "down" to $2.
+#
+# A GET, not a ping. Every row in this panel is one click from a browser, so
+# the question worth answering is "would a browser get something back from this
+# address" — and a machine keeps answering ICMP long after the container behind
+# the port has stopped. Body discarded; only the fact of a reply matters.
+#
+# Any HTTP response counts as up, including 401, 403 and 404. A service that
+# demands a login is a service that is running, and a good half of a homelab
+# sits behind an auth page or a reverse proxy that 404s the bare root. Only a
+# refused connection, a name that won't resolve, or a timeout is down.
+#
+# -k because homelab TLS is self-signed more often than not, and nothing is read
+# from the response: a certificate this can't verify still proves something is
+# listening and speaking HTTPS on that port. No -L, because a redirect is itself
+# an answer and following it spends a second request learning what the first
+# already established.
+probe_url() {
+  local url=$1 out=$2
+  if curl -s -o /dev/null -m "$STATUS_TIMEOUT" -k "$url" 2>/dev/null; then
+    printf 'up' >"$out"
+  else
+    printf 'down' >"$out"
+  fi
+}
+
+# Probe every service at once and print { "<url as given>": "up" | "down" }.
+#
+# Parallel for the same reason the icon fetches are: the panel waits for the
+# slowest single service instead of the sum of them all, and one unplugged box
+# timing out would otherwise stall every dot behind it. Results come back
+# through a temp directory because a background job can't hand a variable to its
+# parent, keyed by hash so any URL is a legal file name.
+status_json() {
+  require_jq
+  require_hash
+  (( $# > 0 )) || { printf '{}\n'; return 0; }
+
+  local dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/dashboard-status.XXXXXX")" \
+    || die "could not create a temp directory"
+
+  local -a urls=() pids=()
+  local url seen=$'\n'
+  for url in "$@"; do
+    urls+=("$url")
+    # One probe per distinct URL even when two rows point at the same service.
+    if [[ $seen != *$'\n'"$url"$'\n'* ]]; then
+      seen+="$url"$'\n'
+      probe_url "$url" "$dir/$(hash_key "$url")" &
+      pids+=("$!")
+    fi
+  done
+
+  # A service being down is an expected outcome, not a script error, so each
+  # wait is allowed to report non-zero without tripping `set -e`.
+  local pid
+  for pid in ${pids[@]+"${pids[@]}"}; do
+    wait "$pid" || true
+  done
+
+  local state
+  for url in "${urls[@]}"; do
+    state="$(cat "$dir/$(hash_key "$url")" 2>/dev/null || true)"
+    [[ -n $state ]] || state="down"
+    # Built through jq rather than string concatenation: the key is a URL the
+    # user typed, and a quote or backslash in it would otherwise break the JSON.
+    jq -n --arg url "$url" --arg state "$state" '{ url: $url, state: $state }'
+  done | jq -s 'map({ (.url): .state }) | add // {}'
+
+  rm -rf "$dir"
+}
+
+# -------------------------------------------------------------------- prefs
+
+# Beside the service list rather than in shell.json, because shell.json is
+# read-only to a plugin and these are toggled from the panel itself. Deriving
+# the path from the data file means one `dataFile` setting relocates both.
+prefs_file() {
+  printf '%s/prefs.json' "$(dirname "$(data_file)")"
+}
+
+# A missing or mangled prefs file is not worth an error: every key has a
+# default, and a panel that refuses to open because a toggle file has a stray
+# comma in it would be a worse bug than the one it is reporting.
+read_prefs() {
+  require_jq
+  local file
+  file="$(prefs_file)"
+  [[ -f $file ]] || { printf '{}\n'; return 0; }
+  jq -e 'type == "object"' "$file" >/dev/null 2>&1 || { printf '{}\n'; return 0; }
+  jq '.' "$file"
+}
+
+set_pref() {
+  require_jq
+  local key=${1-} value=${2-}
+  [[ -n $key ]] || die "set-pref needs a key"
+
+  case " ${PREF_KEYS[*]} " in
+    *" $key "*) ;;
+    *) die "unknown preference: $key" ;;
+  esac
+  case $value in
+    true | false) ;;
+    *) die "preference $key takes true or false" ;;
+  esac
+
+  local file dir tmp current
+  file="$(prefs_file)"
+  dir="$(dirname "$file")"
+  mkdir -p "$dir" || die "could not create $dir"
+  current="$(read_prefs)"
+
+  # Same temp-file-and-rename dance as the service list, for the same reason:
+  # a reader sees the old file or the new one, never a half-written one.
+  tmp="$(mktemp "$dir/.prefs.json.XXXXXX")" || die "could not create a temp file in $dir"
+  if ! printf '%s' "$current" \
+    | jq --arg key "$key" --argjson value "$value" '.[$key] = $value' >"$tmp"; then
+    rm -f "$tmp"
+    die "could not write $tmp"
+  fi
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; die "could not replace $file"; }
+}
+
 while (( $# > 0 )); do
   case $1 in
     --file)
@@ -552,6 +696,9 @@ case ${1:-} in
     while [[ ${1-} == --refresh ]]; do REFRESH=1; shift; done
     icons_json "$@"
     ;;
+  status)      shift; status_json "$@" ;;
+  prefs)       read_prefs ;;
+  set-pref)    shift; set_pref "${1-}" "${2-}" ;;
   path)        data_file; printf '\n' ;;
   cache-dir)   printf '%s\n' "$ICON_CACHE_DIR" ;;
   clear-cache) clear_cache ;;

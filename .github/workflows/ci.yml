@@ -121,6 +121,97 @@ jobs:
           ! ./bin/dashboard list 2>/dev/null
           test "$(cat "$file")" = 'garbage{'
 
+      - name: status reports what answers and what doesn't
+        run: |
+          # An empty sweep is still valid JSON.
+          test "$(./bin/dashboard status | jq -c .)" = "{}"
+
+          python3 -m http.server 8199 --bind 127.0.0.1 --directory "$RUNNER_TEMP" \
+            > /dev/null 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do
+            if curl -s -o /dev/null "http://127.0.0.1:8199/"; then break; fi
+            sleep 0.2
+          done
+
+          ./bin/dashboard status "http://127.0.0.1:8199/" \
+            | jq -e '.["http://127.0.0.1:8199/"] == "up"' > /dev/null
+
+          # Anything that answers is up, including a 404 — a good half of a
+          # homelab sits behind an auth page or a proxy that 404s the bare root.
+          ./bin/dashboard status "http://127.0.0.1:8199/nope" \
+            | jq -e '.["http://127.0.0.1:8199/nope"] == "up"' > /dev/null
+
+          # A refused connection is the down case.
+          OMARCHY_DASHBOARD_STATUS_TIMEOUT=2 ./bin/dashboard status "http://127.0.0.1:1/" \
+            | jq -e '.["http://127.0.0.1:1/"] == "down"' > /dev/null
+
+          # One key per distinct url, however many rows point at it.
+          ./bin/dashboard status "http://127.0.0.1:8199/" "http://127.0.0.1:8199/" \
+            | jq -e 'length == 1' > /dev/null
+
+          # A down service must not swallow the verdict of the ones beside it:
+          # the whole point of probing in parallel is that one dead box doesn't
+          # stall the rest.
+          OMARCHY_DASHBOARD_STATUS_TIMEOUT=2 ./bin/dashboard status \
+            "http://127.0.0.1:8199/" "http://127.0.0.1:1/" \
+            | jq -e '
+              length == 2
+              and .["http://127.0.0.1:8199/"] == "up"
+              and .["http://127.0.0.1:1/"] == "down"
+            ' > /dev/null
+
+          kill "$server" 2>/dev/null || true
+
+      - name: preferences round-trip and reject junk
+        run: |
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/prefs-config"
+          file="$XDG_CONFIG_HOME/omarchy/dashboard/prefs.json"
+
+          # No file yet: every key falls back to its default, which is an empty
+          # object rather than an error.
+          test "$(./bin/dashboard prefs | jq -c .)" = "{}"
+
+          ./bin/dashboard set-pref checkStatus false
+          ./bin/dashboard prefs | jq -e '.checkStatus == false' > /dev/null
+          # Writing one key leaves the other alone.
+          ./bin/dashboard set-pref pollStatus true
+          ./bin/dashboard prefs \
+            | jq -e '.checkStatus == false and .pollStatus == true' > /dev/null
+
+          # Whitelisted keys and boolean values only, so a typo is an error
+          # rather than a key nothing will ever read.
+          ! ./bin/dashboard set-pref nosuchkey true 2>/dev/null
+          ! ./bin/dashboard set-pref checkStatus yes 2>/dev/null
+          ! ./bin/dashboard set-pref checkStatus 2>/dev/null
+          ! ./bin/dashboard set-pref '' true 2>/dev/null
+          ./bin/dashboard prefs \
+            | jq -e '.checkStatus == false and .pollStatus == true' > /dev/null
+
+          # Preferences sit beside the service list, so --file moves both.
+          alt="$RUNNER_TEMP/altprefs/services.json"
+          ./bin/dashboard --file "$alt" set-pref pollStatus false
+          test -f "$RUNNER_TEMP/altprefs/prefs.json"
+          ./bin/dashboard prefs | jq -e '.pollStatus == true' > /dev/null
+
+          # A mangled prefs file falls back to defaults instead of taking the
+          # panel down with it, and the next write repairs it.
+          printf 'garbage{' > "$file"
+          test "$(./bin/dashboard prefs | jq -c .)" = "{}"
+          ./bin/dashboard set-pref checkStatus true
+          ./bin/dashboard prefs | jq -e '.checkStatus == true' > /dev/null
+          test -z "$(find "$(dirname "$file")" -name '.prefs.json.*' -print -quit)"
+
+      - name: the widget and the helper agree on the preference keys
+        run: |
+          # Two copies of a key name drift. The helper whitelists them; the
+          # widget is what passes them to set-pref.
+          for key in checkStatus pollStatus; do
+            grep -q "\"$key\"" bin/dashboard
+            grep -q "setPref(\"$key\"" Widget.qml
+          done
+
       - name: icon names are whitelisted, not escaped
         run: |
           export XDG_CACHE_HOME="$RUNNER_TEMP/cache"

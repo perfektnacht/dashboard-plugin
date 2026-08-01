@@ -43,6 +43,20 @@ Panel {
   // icon name (as the user typed it) -> absolute cached path, "" for a miss.
   // Reassigned wholesale so row bindings re-evaluate; mutating it would not.
   property var iconPaths: ({})
+  // url -> "up" | "down". A url that isn't in here yet has not been probed;
+  // that's a third state the dot draws, not a synonym for "down". Reassigned
+  // wholesale for the same reason iconPaths is.
+  property var statuses: ({})
+  property bool statusPending: false
+
+  // Panel preferences. These live beside the service list rather than in
+  // shell.json, because shell.json is read-only to a plugin and both of these
+  // are toggled from the panel itself. Defaults hold until the file is read,
+  // so the first open after a shell start behaves like every later one.
+  property bool checkStatus: true
+  property bool pollStatus: false
+  property string prefError: ""
+  property var prefQueue: []
 
   property string query: ""
   property int highlightedIndex: -1
@@ -55,9 +69,12 @@ Panel {
   property string saveError: ""
   property string formError: ""
 
-  // "list" shows the services, "form" replaces them with the add/edit fields.
-  // One panel, two states, so the popup never grows a second window.
+  // "list" shows the services, "form" replaces them with the add/edit fields,
+  // "settings" with the preference toggles. One panel, three states, so the
+  // popup never grows a second window.
   property string mode: "list"
+  // Which toggle the keyboard cursor is on in settings mode.
+  property int settingsIndex: 0
   // Empty while adding, the service id while editing.
   property string editingId: ""
   property string pendingDeleteId: ""
@@ -66,15 +83,32 @@ Panel {
   readonly property string errorText: loadError !== "" ? loadError : saveError
 
   // The hero's second line. PanelHero uppercases it, so it's written in
-  // sentence case here. Says how many services there are, and how many the
-  // search narrowed them to — the count is the one fact a list of links can
-  // report about itself before anything probes the network.
+  // sentence case here. How many services there are, how many the search
+  // narrowed them to, and — once the probes land — how many are actually
+  // answering, which is the one number worth reading from across the room.
   readonly property string heroMeta: {
     if (!loaded) return "Loading…"
     var total = services.length
     if (total === 0) return "No services yet"
     if (query.trim() !== "") return rows.length + " of " + total + " shown"
-    return total + (total === 1 ? " service" : " services")
+
+    var base = total + (total === 1 ? " service" : " services")
+    if (!checkStatus) return base
+
+    var up = 0
+    var known = 0
+    for (var i = 0; i < services.length; i++) {
+      var state = statusFor(services[i].url)
+      if (state === "") continue
+      known++
+      if (state === "up") up++
+    }
+    if (known === 0) return base + " · checking…"
+    // "All up" rather than "4 up" when nothing is down: the interesting
+    // reading of this line is whether anything needs attention, and a bare
+    // count makes you compare two numbers to find out.
+    if (known === total && up === total) return base + " · all up"
+    return base + " · " + up + " up"
   }
 
   readonly property var pendingDeleteService: {
@@ -126,6 +160,74 @@ Panel {
     if (refresh === true) command.push("--refresh")
     iconProc.command = command.concat(names)
     iconProc.running = true
+  }
+
+  // One process for the whole sweep, same as the icons: the helper probes in
+  // parallel, so a panel of ten services waits for the slowest one instead of
+  // the sum, and one unplugged box can't stall the dots behind it. Called when
+  // the list lands and after a save — never on a keystroke, since filtering
+  // doesn't change whether a service is answering.
+  function requestStatus() {
+    if (!checkStatus) {
+      statuses = ({})
+      return
+    }
+    // Nothing probes the network behind a closed panel — including the list
+    // load that runs once at shell startup, which would otherwise sweep every
+    // service before the user had opened anything. Opening re-reads the list,
+    // and the sweep rides along with it.
+    if (!opened) return
+    var urls = []
+    var seen = {}
+    for (var i = 0; i < services.length; i++) {
+      var url = String(services[i].url || "")
+      // Prefixed so a service pointed at a url named "constructor" — however
+      // unlikely — doesn't collide with something on Object.prototype.
+      if (url === "" || seen["u:" + url]) continue
+      seen["u:" + url] = true
+      urls.push(url)
+    }
+    if (urls.length === 0) {
+      statuses = ({})
+      return
+    }
+    if (statusProc.running) {
+      statusPending = true
+      return
+    }
+    statusPending = false
+    statusProc.command = [script, "status"].concat(urls)
+    statusProc.running = true
+  }
+
+  function requestPrefs() {
+    if (prefsProc.running) return
+    prefsProc.command = [script, "--file", dataFile, "prefs"]
+    prefsProc.running = true
+  }
+
+  // The toggle has already moved by the time this runs — a switch that waits on
+  // a subprocess to animate feels broken. A failed write is reported in the
+  // settings view rather than rolled back: the setting is live either way, and
+  // what the user needs to know is that it won't survive a restart.
+  //
+  // Queued rather than fired straight off, because `set-pref` is a
+  // read-modify-write of one shared file. Flipping both toggles quickly enough
+  // to overlap two helpers would have the second one read the file before the
+  // first had written it, and silently drop a setting.
+  function setPref(key, value) {
+    prefError = ""
+    prefQueue = prefQueue.concat([{ key: key, value: value === true }])
+    flushPrefs()
+  }
+
+  function flushPrefs() {
+    if (prefProc.running || prefQueue.length === 0) return
+    var next = prefQueue[0]
+    prefQueue = prefQueue.slice(1)
+    prefProc.command = [script, "--file", dataFile, "set-pref", next.key,
+      next.value ? "true" : "false"]
+    prefProc.running = true
   }
 
   // Writes go through the helper too, so the shell process never blocks on
@@ -184,9 +286,73 @@ Panel {
     return typeof value === "string" ? value : ""
   }
 
+  // Same guard as iconPathFor: a service pointed at "toString" would otherwise
+  // pick a function up off Object.prototype and hand a row a state that is
+  // neither "up", "down", nor "".
+  function statusFor(url) {
+    if (!url) return ""
+    var value = statuses[url]
+    return value === "up" || value === "down" ? value : ""
+  }
+
   function clearSearch() {
     query = ""
     searchField.text = ""
+  }
+
+  // ------------------------------------------------------------- settings
+
+  // The two toggles, in the order they're drawn. Kept as data so the keyboard
+  // cursor, the click handlers, and the rows themselves can't disagree about
+  // what is where.
+  readonly property var settingsRows: [
+    { key: "checkStatus", value: checkStatus },
+    { key: "pollStatus", value: pollStatus }
+  ]
+
+  function openSettings() {
+    mode = "settings"
+    prefError = ""
+    settingsIndex = 0
+    pendingDeleteId = ""
+    // The search field is hidden in this mode, so nothing would hold focus and
+    // the catcher's keys would go nowhere.
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function closeSettings() {
+    if (mode !== "settings") return
+    mode = "list"
+    Qt.callLater(function() { searchField.forceActiveFocus() })
+  }
+
+  // The two settings depend on each other — you can't keep re-checking if you
+  // never check — but neither switch is ever disabled for it. A switch you
+  // aren't allowed to touch until you find the other one it's hiding behind is
+  // a worse explanation of that relationship than just doing what was asked:
+  // turning polling on turns checking on with it, and turning checking off
+  // takes polling down, so what the two switches show is always what runs.
+  function toggleSetting(key) {
+    if (key === "checkStatus") {
+      checkStatus = !checkStatus
+      setPref("checkStatus", checkStatus)
+      if (!checkStatus && pollStatus) {
+        pollStatus = false
+        setPref("pollStatus", false)
+      }
+      // Probe straight away when switched on, so the dots fill in while the
+      // settings view is still up and the toggle visibly did something.
+      // Switching off clears them, which is what requestStatus does too.
+      requestStatus()
+    } else if (key === "pollStatus") {
+      pollStatus = !pollStatus
+      setPref("pollStatus", pollStatus)
+      if (pollStatus && !checkStatus) {
+        checkStatus = true
+        setPref("checkStatus", true)
+        requestStatus()
+      }
+    }
   }
 
   // --------------------------------------------------------------- opening
@@ -394,15 +560,23 @@ Panel {
 
   // ------------------------------------------------------------ lifecycle
 
-  Component.onCompleted: requestList()
+  Component.onCompleted: {
+    requestList()
+    requestPrefs()
+  }
 
   // `settings` is injected after construction, so the data file can change
-  // out from under the first load.
-  onDataFileChanged: requestList()
+  // out from under the first load. Preferences live beside the data file, so
+  // they move with it.
+  onDataFileChanged: {
+    requestList()
+    requestPrefs()
+  }
 
   onOpenedChanged: {
     if (!opened) return
     if (mode === "form") closeForm()
+    if (mode === "settings") closeSettings()
     pendingDeleteId = ""
     saveError = ""
     query = ""
@@ -411,8 +585,10 @@ Panel {
     refreshRows()
     // Re-read on every open so hand edits to services.json show up without a
     // shell restart. `rows` keeps the previous list until the new one lands,
-    // so this never flashes an empty panel.
+    // so this never flashes an empty panel. The status sweep rides along with
+    // the list load, so opening the panel is what refreshes the dots.
     requestList()
+    requestPrefs()
     Qt.callLater(function() {
       searchField.text = ""
       searchField.forceActiveFocus()
@@ -433,6 +609,7 @@ Panel {
         root.loaded = true
         root.refreshRows()
         root.requestIcons(false)
+        root.requestStatus()
       }
     }
     stderr: StdioCollector {
@@ -481,6 +658,77 @@ Panel {
   }
 
   Process {
+    id: statusProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          root.statuses = JSON.parse(String(text || "{}"))
+        } catch (error) {
+          // Every row falls back to the waiting dot. A sweep that couldn't be
+          // parsed says nothing about the services, so it shouldn't be
+          // reported as though every one of them were down.
+          root.statuses = ({})
+        }
+      }
+    }
+    // A failed sweep needs no error banner for the same reason: the list is
+    // still a list of links, and the dots simply stay grey.
+    onExited: {
+      if (root.statusPending) Qt.callLater(root.requestStatus)
+    }
+  }
+
+  Process {
+    id: prefsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var values = {}
+        try {
+          values = JSON.parse(String(text || "{}"))
+        } catch (error) {
+          values = {}
+        }
+        // Absent keys keep their defaults, so a prefs file written by an older
+        // version — or none at all — is a normal state, not a missing one.
+        if (typeof values.checkStatus === "boolean") root.checkStatus = values.checkStatus
+        if (typeof values.pollStatus === "boolean") root.pollStatus = values.pollStatus
+      }
+    }
+  }
+
+  Process {
+    id: prefProc
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var message = String(text || "").trim().split("\n")[0]
+        prefProc.failureText = message.replace(/^dashboard:\s*/, "")
+      }
+    }
+    property string failureText: ""
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.prefError = failureText !== ""
+          ? failureText
+          : "Could not save this setting"
+      }
+      failureText = ""
+      root.flushPrefs()
+    }
+  }
+
+  // Only while the panel is open, and only when asked for: a bar widget has no
+  // business probing the network behind a closed popup.
+  Timer {
+    running: root.opened && root.checkStatus && root.pollStatus
+    interval: 15000
+    repeat: true
+    onTriggered: root.requestStatus()
+  }
+
+  Process {
     id: saveProc
     property var payload: null
     property bool refreshIcons: false
@@ -497,6 +745,9 @@ Panel {
         root.services = payload
         root.refreshRows()
         root.requestIcons(refreshIcons)
+        // A new or edited row has no dot until it's been probed, and an edited
+        // URL's old verdict is about an address that is no longer on the list.
+        root.requestStatus()
         // The form stays up on failure so the entry isn't lost.
         if (root.mode === "form") root.closeForm()
       } else {
@@ -553,34 +804,68 @@ Panel {
       // handlers are the fallback for the moment after a click lands somewhere
       // that isn't a text input. The pendingDeleteId guards keep a stray key
       // from acting on the list underneath an open confirmation.
+      // Settings mode has no text field to hold focus, so the catcher drives it
+      // directly: Escape goes back to the list, the cursor walks the toggles,
+      // and Enter or Space flips the one it is on.
       onCloseRequested: {
         if (root.pendingDeleteId !== "") root.pendingDeleteId = ""
+        else if (root.mode === "settings") root.closeSettings()
         else root.close()
       }
       onTabRequested: function(direction) {
-        if (root.pendingDeleteId !== "") return
+        // Tabbing to the next bar panel from inside settings would strand the
+        // user's changes behind a panel they'd have to come back to.
+        if (root.pendingDeleteId !== "" || root.mode === "settings") return
         root.switchPanel(direction)
       }
       onMoveRequested: function(dx, dy) {
-        if (root.pendingDeleteId !== "" || dy === 0 || root.rows.length === 0) return
+        if (root.pendingDeleteId !== "" || dy === 0) return
+        if (root.mode === "settings") {
+          root.settingsIndex = dy > 0
+            ? Math.min(root.settingsRows.length - 1, root.settingsIndex + 1)
+            : Math.max(0, root.settingsIndex - 1)
+          return
+        }
+        if (root.rows.length === 0) return
         root.highlightedIndex = dy > 0
           ? Math.min(root.rows.length - 1, root.highlightedIndex + 1)
           : Math.max(0, root.highlightedIndex - 1)
       }
       onActivateRequested: {
         if (root.pendingDeleteId !== "") return
+        if (root.mode === "settings") {
+          var setting = root.settingsRows[root.settingsIndex]
+          if (setting) root.toggleSetting(setting.key)
+          return
+        }
         root.activateRow(root.highlightedRow())
       }
       onDeleteRequested: {
-        if (root.pendingDeleteId !== "") return
+        if (root.pendingDeleteId !== "" || root.mode === "settings") return
         var row = root.highlightedRow()
         if (row) root.requestDelete(row.key)
       }
       onTextKey: function(text) {
-        if (root.pendingDeleteId !== "") return
+        // In settings mode a stray letter has nowhere to go: typing into the
+        // hidden search field would silently filter a list you can't see.
+        if (root.pendingDeleteId !== "" || root.mode === "settings") return
         searchField.text += text
         searchField.forceActiveFocus()
         searchField.cursorPosition = searchField.text.length
+      }
+
+      // Ctrl+, is claimed here rather than in the search field's key handler,
+      // where every other shortcut lives. PanelKeyCatcher sees keys first and
+      // forwards anything with printable text straight into the search box —
+      // Ctrl+N survives that because Qt hands it a control character, but
+      // Ctrl+, arrives as a plain "," and lands in the query before a field
+      // handler ever runs. A Shortcut consumes the event outright. Scoped to
+      // an open panel in list mode, so it can't fire from the form, from the
+      // settings view it opens, or from a closed popup.
+      Shortcut {
+        sequence: "Ctrl+,"
+        enabled: root.opened && root.mode === "list"
+        onActivated: root.openSettings()
       }
 
       Column {
@@ -611,13 +896,26 @@ Panel {
           }
 
           trailingControl: Component {
-            PanelActionButton {
-              iconText: "󰐕"
-              tooltipText: "Add a service  (Ctrl+N)"
-              foreground: root.dim
-              hoverColor: Color.accent
-              fontFamily: root.fontFamily
-              onClicked: root.openForm(null)
+            Row {
+              spacing: Style.spacing.xs
+
+              PanelActionButton {
+                iconText: "󰒓"
+                tooltipText: "Settings  (Ctrl+,)"
+                foreground: root.dim
+                hoverColor: Color.accent
+                fontFamily: root.fontFamily
+                onClicked: root.openSettings()
+              }
+
+              PanelActionButton {
+                iconText: "󰐕"
+                tooltipText: "Add a service  (Ctrl+N)"
+                foreground: root.dim
+                hoverColor: Color.accent
+                fontFamily: root.fontFamily
+                onClicked: root.openForm(null)
+              }
             }
           }
         }
@@ -742,6 +1040,10 @@ Panel {
             // Both render the fallback glyph, so the row never waits on the
             // network to become useful.
             readonly property string iconPath: root.iconPathFor(modelData.icon)
+            // "up", "down", or "" for not probed yet. Not called `state`:
+            // that name is taken by Item's own state machine, and assigning a
+            // string to it would try to activate a state called "up".
+            readonly property string reachability: root.statusFor(modelData.url)
 
             width: ListView.view.width
             height: root.rowHeight
@@ -789,6 +1091,38 @@ Panel {
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.icon
+              }
+
+              // Reachability, badged on the tile rather than set inline with the
+              // name. The tile is the row's anchor and the one thing every row
+              // has, and its outer corner is the only part of a row the hover
+              // actions never reach — so the dot is readable on all four rows at
+              // once, not just the lit one.
+              //
+              // Three states, no green: accent for answering, urgent for not,
+              // and a faint foreground while the sweep is still out. Every one
+              // of those comes from the theme, so a light theme gets a dot it
+              // can actually see. Shape follows the theme's corners the way the
+              // rest of the kit does — a circle on round, a square on sharp.
+              Rectangle {
+                visible: root.checkStatus
+                width: Style.space(9)
+                height: width
+                radius: Style.cornerRadius > 0 ? width / 2 : 0
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.rightMargin: -Style.space(2)
+                anchors.bottomMargin: -Style.space(2)
+                color: {
+                  if (serviceRow.reachability === "up") return Color.accent
+                  if (serviceRow.reachability === "down") return Color.urgent
+                  return Util.alpha(root.foreground, 0.3)
+                }
+                // A ring in the panel's own background, so the dot reads as a
+                // badge sitting on the tile rather than a hole punched in it —
+                // and stays legible against a logo of any color underneath.
+                border.width: Style.space(2)
+                border.color: Color.popups.background
               }
             }
 
@@ -903,6 +1237,106 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+          }
+        }
+
+        // --------------------------------------------------------- settings
+        Column {
+          id: settingsColumn
+          width: parent.width
+          visible: root.mode === "settings"
+          spacing: Style.space(10)
+
+          PanelHero {
+            width: parent.width
+            title: "Dashboard"
+            meta: "Settings"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+
+            iconComponent: Component {
+              Text {
+                text: "󰒓"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.display
+              }
+            }
+
+            trailingControl: Component {
+              PanelActionButton {
+                iconText: "󰅁"
+                tooltipText: "Back  (Esc)"
+                foreground: root.dim
+                hoverColor: Color.accent
+                fontFamily: root.fontFamily
+                onClicked: root.closeSettings()
+              }
+            }
+          }
+
+          PanelSeparator {
+            width: parent.width
+            foreground: root.foreground
+          }
+
+          PanelSectionHeader {
+            text: "REACHABILITY"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Toggle {
+            width: parent.width
+            label: "Check when the panel opens"
+            description: "One request per service, in parallel"
+            checked: root.checkStatus
+            hasCursor: root.settingsIndex === 0
+            foreground: root.foreground
+            accent: Color.accent
+            fontFamily: root.fontFamily
+            onClicked: {
+              root.settingsIndex = 0
+              root.toggleSetting("checkStatus")
+            }
+            onHovered: function(isHovered) { if (isHovered) root.settingsIndex = 0 }
+          }
+
+          Toggle {
+            width: parent.width
+            label: "Keep checking while open"
+            description: "Re-check every 15 seconds"
+            checked: root.pollStatus
+            hasCursor: root.settingsIndex === 1
+            foreground: root.foreground
+            accent: Color.accent
+            fontFamily: root.fontFamily
+            onClicked: {
+              root.settingsIndex = 1
+              root.toggleSetting("pollStatus")
+            }
+            onHovered: function(isHovered) { if (isHovered) root.settingsIndex = 1 }
+          }
+
+          Text {
+            width: parent.width
+            text: "A service counts as up if it answers at all — a login page "
+              + "or a 404 still means it's running. Only a refused connection, "
+              + "an unknown name, or a timeout is down."
+            color: root.fainter
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            visible: root.prefError !== ""
+            width: parent.width
+            text: root.prefError
+            color: Color.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
           }
         }

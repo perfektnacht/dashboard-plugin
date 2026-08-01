@@ -19,11 +19,52 @@ inside the panel; nothing has to be hand-edited to use it.
 | 󰐕, Ctrl+N | Add a service |
 | 󰏫, Ctrl+E | Edit the highlighted service |
 | 󰆴, Delete | Delete the highlighted service (asks first) |
-| Escape | Leave the form, or close the panel |
+| 󰒓, Ctrl+, | Settings |
+| Escape | Leave the form or settings, or close the panel |
 | Tab / Shift+Tab | In the list, move to the next/previous bar panel. In the form, move between fields |
 
 The list is re-read every time the panel opens, so edits to `services.json` from
 a text editor show up as soon as you open it again.
+
+## Reachability
+
+Each row carries a dot on the corner of its icon: **accent** when the service
+answered, **red** when it didn't, and **grey** while the check is still out. The
+hero line counts them — `4 services · 2 up`, or `· all up` when nothing needs
+attention.
+
+The check is an HTTP GET, not a ping. Every row here is one click from a
+browser, so the question worth answering is whether a browser would get
+something back — and a machine keeps answering ICMP long after the container
+behind the port has stopped.
+
+**Anything that answers counts as up**, including `401`, `403`, and `404`: a
+service that demands a login is a service that is running, and a good half of a
+homelab sits behind an auth page or a reverse proxy that 404s the bare root.
+Only a refused connection, a name that won't resolve, or a timeout is down.
+Certificates aren't verified — homelab TLS is self-signed more often than not,
+and nothing is read from the response anyway.
+
+Every service is probed in parallel, once per open, so the panel waits for the
+slowest one rather than the sum of them all. Set
+`OMARCHY_DASHBOARD_STATUS_TIMEOUT` to change the four-second budget.
+
+### Settings
+
+󰒓 in the panel header, or Ctrl+, — Up/Down to move, Enter or Space to flip a
+switch, Escape to go back.
+
+| Setting | Default | |
+| ------- | ------- | --- |
+| Check when the panel opens | on | Probe every service each time the panel opens. Off means no dots and no requests. |
+| Keep checking while open | off | Re-check every 15 seconds for as long as the panel stays open. Never runs behind a closed panel. |
+
+The two move together, since neither half makes sense alone: turning polling on
+turns checking on with it, and turning checking off takes polling down.
+
+These are stored in `prefs.json` beside the service list — not in `shell.json`,
+which a plugin can't write. Moving the list with `dataFile` moves them too.
+Deleting the file resets both to their defaults.
 
 ## Services
 
@@ -190,8 +231,8 @@ omarchy plugin remove perfektnacht.dashboard-plugin
 ### Removing the plugin does not remove your services
 
 `omarchy plugin remove` deletes the *code*. Your service list is not in the
-plugin directory and never was, so it survives — as does the icon cache.
-Reinstalling picks up exactly where you left off.
+plugin directory and never was, so it survives — as do your settings and the
+icon cache. Reinstalling picks up exactly where you left off.
 
 That is the point of storing it outside the checkout, but it inverts the usual
 expectation, so it is worth being explicit: **reinstalling is not a reset.**
@@ -215,9 +256,10 @@ mv ~/.config/omarchy/dashboard ~/dashboard-services.bak
 rm -rf ~/.config/omarchy/dashboard
 ```
 
-The next time the panel opens it recreates the directory and reseeds the three
-examples, exactly as on a first install. If you set `dataFile`, clear that path
-instead — the default above is no longer the one in use.
+That directory holds `prefs.json` as well, so this resets the settings with the
+list. The next time the panel opens it recreates the directory and reseeds the
+three examples, exactly as on a first install. If you set `dataFile`, clear that
+path instead — the default above is no longer the one in use.
 
 The icon cache is separate and safe to delete at any time; it refetches.
 
@@ -232,7 +274,8 @@ of this one (and any other) before you enable it.
 
 - Omarchy Shell
 - `jq`
-- `curl` (icon fetching; everything else works without a network)
+- `curl` (icon fetching and reachability checks; everything else works without a
+  network)
 - `sha256sum` (coreutils) — names cache entries
 - `qt6-svg` — Qt's SVG image handler. Without it SVG icons stay as the fallback
   glyph and nothing else breaks; `.png` icon URLs still render.
@@ -248,6 +291,9 @@ bin/dashboard save '[...]'           # validate and write atomically (temp file 
 bin/dashboard icon plex.svg          # print the cached path, fetching if needed
 bin/dashboard icon https://host/i.svg   # the URL form works here too
 bin/dashboard icons plex arr-dashboard  # resolve several at once as JSON
+bin/dashboard status http://nas:8096 http://router  # probe in parallel, JSON of url -> up/down
+bin/dashboard prefs                  # print the panel preferences as JSON
+bin/dashboard set-pref pollStatus true   # set one preference
 bin/dashboard path                   # where the service file is
 bin/dashboard cache-dir              # where cached icons live
 bin/dashboard clear-cache            # forget every cached icon and miss
