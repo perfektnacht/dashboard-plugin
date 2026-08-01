@@ -12,6 +12,9 @@ dashboard/
 .vscode/
 .idea/
 
+# Local working notes — planning scratch, not documentation for anyone else.
+recommendations.md
+
 # Icon cache, if XDG_CACHE_HOME is ever redirected into the repo while testing.
 icons/
 icon-misses/
