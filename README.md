@@ -5,7 +5,7 @@ link — icon, name, URL — and clicking it opens the service in whichever brow
 `xdg-settings` says is yours. Services are added, edited, and deleted from
 inside the panel; nothing has to be hand-edited to use it.
 
-![Preview Video](preview/preview.mp4)
+![Preview Video](preview/normal_menu.png)
 
 ## Install
 
