@@ -122,12 +122,17 @@ The icon cache is separate and safe to delete at any time; it refetches.
 | Type | Filter by name, URL, or icon name |
 | Up / Down | Move the highlight |
 | Enter, click | Open the highlighted service in the default browser |
-| 󰐕, Ctrl+N | Add a service |
-| 󰏫, Ctrl+E | Edit the highlighted service |
-| 󰆴, Delete | Delete the highlighted service (asks first) |
-| 󰒓, Ctrl+, | Settings |
+| Plus button, Ctrl+N | Add a service |
+| Pencil button, Ctrl+E | Edit the highlighted service |
+| Trash button, Delete | Delete the highlighted service (asks first) |
+| Gear button, Ctrl+, | Settings |
 | Escape | Leave the form or settings, or close the panel |
 | Tab / Shift+Tab | In the list, move to the next/previous bar panel. In the form, move between fields |
+
+The plus and gear sit in the panel header; the pencil and trash appear on the
+row under the cursor. They're drawn as Nerd Font icons, which is why they're
+named here in words — the codepoints are private-use and render as empty boxes
+anywhere without that font, this page included.
 
 The list is re-read every time the panel opens, so edits to `services.json` from
 a text editor show up as soon as you open it again.
@@ -227,8 +232,8 @@ would re-ask the CDN every single time the panel opened. Correcting the entry in
 the form retries immediately; `bin/dashboard clear-cache` forgets everything, and
 `bin/dashboard icons --refresh <icon>` retries just one.
 
-Rows whose icon is missing, misspelled, or not fetched yet draw 󰖟 in the theme
-foreground instead. That is deliberate rather than a bundled placeholder image:
+Rows whose icon is missing, misspelled, or not fetched yet draw a globe glyph in
+the theme foreground instead. That is deliberate rather than a bundled image:
 a glyph repaints when you switch themes, a shipped PNG does not.
 
 ### What is accepted
@@ -246,8 +251,8 @@ Bare names stay on the old strict rules: lowercase letters, digits, `.`, `_` and
 
 ## Settings
 
-󰒓 in the panel header, or Ctrl+, — Up/Down to move, Enter or Space to flip a
-switch, Escape to go back.
+The gear in the panel header, or Ctrl+, — Up/Down to move, Enter or Space to
+flip a switch, Escape to go back.
 
 | Setting | Default | |
 | ------- | ------- | --- |
@@ -273,8 +278,8 @@ It's a word rather than a coloured dot on purpose: a dot carries its whole
 meaning in its hue, which is one colour-blind reader or one heavily tinted theme
 away from saying nothing. The colour is still there as a second channel.
 
-The status shares its slot with the row's 󰏫 and 󰆴 buttons, which appear on the
-row under the cursor. You want the status while scanning the list and the
+The status shares its slot with the row's edit and delete buttons, which appear
+on the row under the cursor. You want the status while scanning the list and the
 buttons once you've picked a row, so the two trade places instead of stacking —
 which is also why an unpointed-at list shows no cursor at all.
 
@@ -301,9 +306,9 @@ scanlines, aperture grille, bloom, and a moulded bezel around a rounded glass
 edge.
 
 It is **off by default**, and lives under **Appearance → CRT mode** in the
-settings panel (󰒓 or Ctrl+,). It's a strong look, and not one to inherit by
-installing a list of links. Like the other toggles it's stored in `prefs.json`,
-so it survives a shell restart.
+settings panel (the gear, or Ctrl+,). It's a strong look, and not one to
+inherit by installing a list of links. Like the other toggles it's stored in
+`prefs.json`, so it survives a shell restart.
 
 **The image is static.** Every stage is a function of position alone, so the
 panel is drawn once and then costs nothing until something on it changes. There
