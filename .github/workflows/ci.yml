@@ -208,10 +208,17 @@ jobs:
       - name: the widget and the helper agree on the preference keys
         run: |
           # Two copies of a key name drift. The helper whitelists them; the
-          # widget is what passes them to set-pref.
-          for key in checkStatus pollStatus crtEnabled; do
-            grep -q "\"$key\"" bin/dashboard
-            grep -q "setPref(\"$key\"" Widget.qml
+          # widget is what passes them to set-pref. Read the list out of the
+          # helper rather than spelling it a third time here — a hardcoded list
+          # in the check is one more copy to forget, which is the failure this
+          # step exists to catch.
+          keys="$(grep -oP '(?<=^PREF_KEYS=\().*(?=\))' bin/dashboard | tr -d '"')"
+          test -n "$keys"
+          for key in $keys; do
+            grep -q "setPref(\"$key\"" Widget.qml \
+              || { echo "$key is whitelisted in bin/dashboard but never set in Widget.qml"; exit 1; }
+            grep -q "typeof values.$key === \"boolean\"" Widget.qml \
+              || { echo "$key is never read back from prefs.json in Widget.qml"; exit 1; }
           done
 
       - name: the compiled shader is not stale

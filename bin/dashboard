@@ -55,7 +55,7 @@ STATUS_TIMEOUT="${OMARCHY_DASHBOARD_STATUS_TIMEOUT:-4}"
 
 # Panel preferences that the widget itself writes. Kept to a whitelist so a
 # typo in `set-pref` is an error rather than a key nothing will ever read.
-PREF_KEYS=("checkStatus" "pollStatus" "crtEnabled")
+PREF_KEYS=("checkStatus" "pollStatus" "showUrls" "crtEnabled")
 
 REFRESH=0
 
@@ -83,7 +83,7 @@ Commands:
                            a JSON object of url -> "up" | "down".
   prefs                    Print the panel preferences as JSON.
   set-pref KEY true|false  Set one panel preference. Keys: checkStatus,
-                           pollStatus, crtEnabled.
+                           pollStatus, showUrls, crtEnabled.
   path                     Print the resolved data file path.
   cache-dir                Print the icon cache directory.
   clear-cache              Delete every cached icon and miss marker.

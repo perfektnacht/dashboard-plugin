@@ -58,6 +58,15 @@ Panel {
   property string prefError: ""
   property var prefQueue: []
 
+  // The address under each name. On by default, because it is what tells two
+  // similarly named services apart and it is the thing you are about to open.
+  // Off is for a shared screen: a homelab list is a map of someone's private
+  // network — hostnames, ports, and often the internal addressing scheme — and
+  // a screenshot of it hands all of that to whoever is watching. Hiding it
+  // costs the reader a detail they mostly already know; showing it costs them
+  // something they cannot take back.
+  property bool showUrls: true
+
   // CRT phosphor pass over the panel contents. Off unless asked for: it is a
   // strong look and it wakes the GPU every frame the panel is open, neither of
   // which anybody should inherit by installing a list of links.
@@ -361,12 +370,13 @@ Panel {
 
   // ------------------------------------------------------------- settings
 
-  // The two toggles, in the order they're drawn. Kept as data so the keyboard
+  // The toggles, in the order they're drawn. Kept as data so the keyboard
   // cursor, the click handlers, and the rows themselves can't disagree about
   // what is where.
   readonly property var settingsRows: [
     { key: "checkStatus", value: checkStatus },
     { key: "pollStatus", value: pollStatus },
+    { key: "showUrls", value: showUrls },
     { key: "crtEnabled", value: crtEnabled }
   ]
 
@@ -412,6 +422,9 @@ Panel {
         setPref("checkStatus", true)
         requestStatus()
       }
+    } else if (key === "showUrls") {
+      showUrls = !showUrls
+      setPref("showUrls", showUrls)
     } else if (key === "crtEnabled") {
       crtEnabled = !crtEnabled
       setPref("crtEnabled", crtEnabled)
@@ -757,6 +770,7 @@ Panel {
         // version — or none at all — is a normal state, not a missing one.
         if (typeof values.checkStatus === "boolean") root.checkStatus = values.checkStatus
         if (typeof values.pollStatus === "boolean") root.pollStatus = values.pollStatus
+        if (typeof values.showUrls === "boolean") root.showUrls = values.showUrls
         if (typeof values.crtEnabled === "boolean") root.crtEnabled = values.crtEnabled
       }
     }
@@ -1222,8 +1236,14 @@ Panel {
                 elide: Text.ElideRight
               }
 
+              // Hidden rather than truncated when addresses are off. The row
+              // keeps its height either way, so the name simply centres in it
+              // and the list geometry does not move — a setting that reflowed
+              // the panel would be a different panel, not the same one with
+              // less on show.
               Text {
                 width: parent.width
+                visible: root.showUrls
                 text: serviceRow.modelData.url
                 color: root.dim
                 font.family: root.fontFamily
@@ -1460,18 +1480,46 @@ Panel {
 
           Toggle {
             width: parent.width
-            label: "CRT mode"
-            description: "Scanlines, curvature and a phosphor glow"
-            checked: root.crtEnabled
+            label: "Show addresses"
+            description: "The URL under each service name"
+            checked: root.showUrls
             hasCursor: root.settingsIndex === 2
             foreground: root.foreground
             accent: Color.accent
             fontFamily: root.fontFamily
             onClicked: {
               root.settingsIndex = 2
-              root.toggleSetting("crtEnabled")
+              root.toggleSetting("showUrls")
             }
             onHovered: function(isHovered) { if (isHovered) root.settingsIndex = 2 }
+          }
+
+          Text {
+            visible: !root.showUrls
+            width: parent.width
+            text: "Names only. Search still matches on the address, and rows "
+              + "still open it — it just isn't on screen to be read over your "
+              + "shoulder or caught in a screenshot."
+            color: root.fainter
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Toggle {
+            width: parent.width
+            label: "CRT mode"
+            description: "Scanlines, curvature and a phosphor glow"
+            checked: root.crtEnabled
+            hasCursor: root.settingsIndex === 3
+            foreground: root.foreground
+            accent: Color.accent
+            fontFamily: root.fontFamily
+            onClicked: {
+              root.settingsIndex = 3
+              root.toggleSetting("crtEnabled")
+            }
+            onHovered: function(isHovered) { if (isHovered) root.settingsIndex = 3 }
           }
 
           // Said here rather than by greying out the switch: the setting is

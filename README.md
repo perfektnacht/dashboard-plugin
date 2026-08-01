@@ -252,6 +252,7 @@ flip a switch, Escape to go back.
 | ------- | ------- | --- |
 | Check when the panel opens | on | Probe every service each time the panel opens. Off means no UP/DOWN and no requests. See [Reachability](#reachability). |
 | Keep checking while open | off | Re-check every 15 seconds for as long as the panel stays open. Never runs behind a closed panel. |
+| Show addresses | on | The URL under each service name — see [Hiding the addresses](#hiding-the-addresses). |
 | CRT mode | off | The phosphor shader — see [CRT mode](#crt-mode). |
 
 The two reachability toggles move together, since neither half makes sense
@@ -260,7 +261,28 @@ takes polling down.
 
 These are stored in `prefs.json` beside the service list — not in `shell.json`,
 which a plugin can't write. Moving the list with `dataFile` moves them too.
-Deleting the file resets both to their defaults.
+Deleting the file resets them all to their defaults.
+
+### Hiding the addresses
+
+**Show addresses** off draws each row as its name alone. It is on by default,
+because the address is what tells two similarly named boxes apart and it is the
+thing the row is about to open.
+
+Turn it off before you share a screen. A homelab list is a map of a private
+network — hostnames, ports, and usually the shape of the internal addressing —
+and a screenshot of it hands all of that to everyone watching, permanently. The
+long ones are also the ones that elide into `…` and tell you nothing anyway, so
+on a list of raw IPs the setting costs very little to read.
+
+What it does *not* do is change the list. Search still matches on the address,
+rows still open it, and the edit form still shows it — so the URL is one click
+from the screen if you go looking. It is a display setting, not a redaction:
+it keeps the addresses out of a screenshot, not out of the hands of someone
+sitting at your keyboard.
+
+Row height doesn't change with it. The name centres in the space the two lines
+used, so nothing else on the panel moves.
 
 ## Reachability
 
