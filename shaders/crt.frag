@@ -24,12 +24,16 @@ layout(std140, binding = 0) uniform buf {
     float aberration;    //  92
     float tintAmount;    //  96
     float glassCorner;   // 100
+    // Corner radius of the housing itself, in physical pixels rather than as a
+    // fraction: a moulded corner has a radius, and a fraction of a panel that
+    // isn't square would draw a quarter-ellipse instead.
+    float outerCorner;   // 104
     // A vec2, not a scalar: UV is normalised per axis, so one number would
     // make the frame thicker on the long side of a panel that isn't square.
-    vec2 bezel;          // 104
-    vec2 resolution;     // 112
-    // 120 is not 16-aligned, so the vec4s start at 128 and eight bytes go to
-    // padding. Left as it falls rather than reordered: the eight bytes cost
+    vec2 bezel;          // 112
+    vec2 resolution;     // 120
+    // 108 is not 8-aligned, so bezel starts at 112 and four bytes go to
+    // padding. Left as it falls rather than reordered: the four bytes cost
     // nothing and the declaration order still reads in the order the effect
     // applies them.
     vec4 tint;           // 128
@@ -100,10 +104,24 @@ void main() {
     vec3 frame = bezelTint.rgb * (1.08 - 0.22 * qt_TexCoord0.y);
     frame *= mix(0.55, 1.0, smoothstep(-0.10, 0.02, -dist));
 
+    // The housing's outside edge. The glass has been rounded since the start
+    // and the plastic around it had not, which left the one square corner in a
+    // panel whose own border is already curved — read as a hard grey box sat
+    // inside a rounded window. Measured in pixels on the unwarped coordinates:
+    // this is the moulding, so it does not bow with the tube.
+    vec2 halfPanel = resolution * 0.5;
+    float outerRadius = min(outerCorner, min(halfPanel.x, halfPanel.y));
+    float outerDist = roundedBox((qt_TexCoord0 - 0.5) * resolution,
+                                 halfPanel, outerRadius);
+    float outerAA = max(fwidth(outerDist), 1e-5);
+    // Alpha, not a colour: what shows through the corner is the panel's own
+    // background, the same as the margin already visible around the frame.
+    float inPanel = 1.0 - smoothstep(-outerAA, outerAA, outerDist);
+
     // Past the glass there is nothing to sample, and sampling anyway would
     // smear the edge texel across the whole frame.
     if (inGlass <= 0.0) {
-        fragColor = vec4(frame, 1.0) * qt_Opacity;
+        fragColor = vec4(frame, 1.0) * qt_Opacity * inPanel;
         return;
     }
 
@@ -161,8 +179,10 @@ void main() {
     float vig = pow(v.x * v.y * 22.0, vignette * 0.6);
     color *= clamp(vig, 0.0, 1.0);
 
-    // Blend glass into frame across the antialiased edge. Opaque throughout:
-    // the frame is a physical object and the tube behind it isn't a window, so
-    // neither has any business letting the desktop through.
-    fragColor = vec4(mix(frame, color, inGlass), 1.0) * qt_Opacity;
+    // Blend glass into frame across the antialiased edge. Opaque everywhere
+    // inside the housing: the frame is a physical object and the tube behind it
+    // isn't a window, so neither has any business letting the desktop through.
+    // The only transparency is outside the rounded corners, where the panel
+    // behind shows instead. Premultiplied, which is what the scene graph wants.
+    fragColor = vec4(mix(frame, color, inGlass), 1.0) * qt_Opacity * inPanel;
 }

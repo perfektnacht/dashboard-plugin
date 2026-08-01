@@ -88,6 +88,14 @@ Panel {
   // Thickness of the moulded frame around the glass, in pixels, and zero when
   // the effect is off so the layout collapses back to exactly what it was.
   readonly property int crtBezel: crtActive ? Style.space(16) : 0
+  // Corner radius of the housing's outside edge. Three quarters of the wall
+  // thickness is roughly what moulded plastic does, and it is a floor of the
+  // desktop's own rounding rather than a fixed number, so the frame is never
+  // squarer than the panel border already curving around it. Style.cornerRadius
+  // is Hyprland's decoration:rounding, so this follows the desktop live.
+  readonly property int crtOuterRadius: crtActive
+    ? Math.max(Style.cornerRadius, Math.round(crtBezel * 0.75))
+    : 0
   // Dark glass between the frame and the first pixel of content. No tube ever
   // ran text to the edge of its phosphor — an Apple Monitor /// keeps a good
   // centimetre of black around the last character — and here that margin is
@@ -1741,6 +1749,9 @@ Panel {
       property real aberration: 0.5
       property real tintAmount: 1.0
       property real glassCorner: 0.10
+      // Physical pixels, matching `resolution`, because the shader measures the
+      // housing corner in pixels rather than in fractions of the panel.
+      property real outerCorner: root.crtOuterRadius * Screen.devicePixelRatio
       // Per axis, so the frame is the same pixel thickness all the way round
       // rather than a letterbox on the long side. The layout works in pixels;
       // the shader wants fractions of the panel.

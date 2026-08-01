@@ -318,8 +318,15 @@ slowest one rather than the sum of them all. Set
 ## CRT mode
 
 The panel's contents can be rendered through a phosphor shader — barrel warp,
-scanlines, aperture grille, bloom, and a moulded bezel around a rounded glass
-edge.
+scanlines, aperture grille, bloom, and a moulded bezel, rounded on both edges,
+around the glass.
+
+Both radii are measured in pixels rather than as a fraction of the panel, so
+the corners stay circular whatever shape the list makes the panel. The outer
+one is three quarters of the frame's thickness, with the desktop's own
+`decoration:rounding` as a floor, so the housing is never squarer than the
+window border around it. What shows through the curve is the panel background
+that already surrounds the frame.
 
 It is **off by default**, and lives under **Appearance → CRT mode** in the
 settings panel (the gear, or Ctrl+,). It's a strong look, and not one to
