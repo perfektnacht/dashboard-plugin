@@ -60,6 +60,11 @@ Panel {
 
   property string query: ""
   property int highlightedIndex: -1
+  // Whether the cursor got where it is by pointing rather than by typing. The
+  // mouse's highlight is a hover, so it goes away when the pointer leaves;
+  // the keyboard's is a selection, and has to survive a pointer that happens
+  // to be somewhere else entirely.
+  property bool cursorFromMouse: false
   property bool loaded: false
   property bool listPending: false
   property bool iconsPending: false
@@ -269,7 +274,25 @@ Panel {
       })
     }
     rows = out
-    highlightedIndex = rows.length > 0 ? 0 : -1
+    // No cursor until there's a reason for one. Parking it on the first row
+    // meant that row permanently traded its status for action buttons the user
+    // hadn't pointed at — the one row you could never read the state of was the
+    // top one. A query is a reason: the first match takes the cursor so Enter
+    // opens what you just searched for.
+    highlightedIndex = (rows.length > 0 && query.trim() !== "") ? 0 : -1
+    cursorFromMouse = false
+  }
+
+  // Enter the list from "no cursor" at whichever end the key implies, so Up on
+  // a freshly opened panel lands on the last row instead of the first.
+  function moveCursor(delta) {
+    if (rows.length === 0 || delta === 0) return
+    cursorFromMouse = false
+    if (highlightedIndex < 0) {
+      highlightedIndex = delta > 0 ? 0 : rows.length - 1
+      return
+    }
+    highlightedIndex = Math.max(0, Math.min(rows.length - 1, highlightedIndex + delta))
   }
 
   function highlightedRow() {
@@ -826,10 +849,7 @@ Panel {
             : Math.max(0, root.settingsIndex - 1)
           return
         }
-        if (root.rows.length === 0) return
-        root.highlightedIndex = dy > 0
-          ? Math.min(root.rows.length - 1, root.highlightedIndex + 1)
-          : Math.max(0, root.highlightedIndex - 1)
+        root.moveCursor(dy)
       }
       onActivateRequested: {
         if (root.pendingDeleteId !== "") return
@@ -963,13 +983,10 @@ Panel {
                   || event.key === Qt.Key_Backtab ? -1 : 1)
                 event.accepted = true
               } else if (event.key === Qt.Key_Down) {
-                if (root.rows.length > 0)
-                  root.highlightedIndex = Math.min(root.rows.length - 1,
-                    root.highlightedIndex + 1)
+                root.moveCursor(1)
                 event.accepted = true
               } else if (event.key === Qt.Key_Up) {
-                if (root.rows.length > 0)
-                  root.highlightedIndex = Math.max(0, root.highlightedIndex - 1)
+                root.moveCursor(-1)
                 event.accepted = true
               } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 root.activateRow(root.highlightedRow())
@@ -1018,6 +1035,19 @@ Panel {
           interactive: contentHeight > height
 
           ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          // A hover highlight belongs to the pointer, so it's given back when
+          // the pointer leaves: the row stops showing action buttons and goes
+          // back to reporting whether it's up. A cursor the keyboard put there
+          // is a selection and stays put.
+          HoverHandler {
+            onHoveredChanged: {
+              if (!hovered && root.cursorFromMouse) {
+                root.highlightedIndex = -1
+                root.cursorFromMouse = false
+              }
+            }
+          }
 
           model: root.rows
           currentIndex: root.highlightedIndex
@@ -1206,7 +1236,10 @@ Panel {
               z: -1
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
-              onEntered: root.highlightedIndex = serviceRow.index
+              onEntered: {
+                root.highlightedIndex = serviceRow.index
+                root.cursorFromMouse = true
+              }
               onClicked: root.activateRow(serviceRow.modelData)
             }
           }
