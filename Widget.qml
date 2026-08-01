@@ -68,8 +68,11 @@ Panel {
   property bool showUrls: true
 
   // CRT phosphor pass over the panel contents. Off unless asked for: it is a
-  // strong look and it wakes the GPU every frame the panel is open, neither of
-  // which anybody should inherit by installing a list of links.
+  // strong look, and not one anybody should inherit by installing a list of
+  // links. An idle panel is free — every stage of the shader is a function of
+  // position alone, so it draws once and then costs nothing until something
+  // changes — but each change repaints the whole panel through it, which has
+  // only ever been measured on a discrete GPU.
   property bool crtEnabled: false
 
   // A phosphor screen emits light on a dark tube, so the effect assumes the
