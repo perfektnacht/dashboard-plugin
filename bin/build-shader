@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+# Compiles shaders/crt.frag to the .qsb the widget actually loads, and records
+# the hash of the source it was built from.
+#
+# The hash is the point. The compiled artifact has to be committed — the plugin
+# is installed by cloning it, with no build step on the way in — so a .frag edit
+# that never got recompiled is invisible: the shader keeps rendering the old
+# code and nothing complains. CI can't just rebuild and compare bytes either,
+# because qsb's output varies between Qt versions and the runner's will not
+# match a developer's. Comparing a source hash sidesteps the version question
+# entirely, and it only works if the hash is written by the same command that
+# does the compiling, which is why this is a script and not a README line.
+
+set -euo pipefail
+
+export LC_ALL=C
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SHADER_DIR="$ROOT/shaders"
+
+# qsb ships in qt6-shadertools and is not on PATH on a default Arch install.
+QSB="${QSB:-}"
+if [ -z "$QSB" ]; then
+  for candidate in qsb /usr/lib/qt6/bin/qsb /usr/lib/qt6/qsb; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      QSB="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -z "$QSB" ]; then
+  echo "build-shader: qsb not found. Install qt6-shadertools (Arch) or" >&2
+  echo "              qt6-shader-baker (Debian/Ubuntu), or set QSB=/path/to/qsb." >&2
+  exit 1
+fi
+
+status=0
+for frag in "$SHADER_DIR"/*.frag; do
+  [ -e "$frag" ] || continue
+  name="$(basename "$frag")"
+
+  if ! "$QSB" --qt6 -o "$frag.qsb" "$frag"; then
+    echo "build-shader: $name failed to compile" >&2
+    status=1
+    continue
+  fi
+
+  # Bare hash, no filename, so the file does not care where the checkout lives.
+  sha256sum "$frag" | cut -d' ' -f1 > "$frag.sha256"
+  echo "build-shader: $name -> $name.qsb ($("$QSB" --version 2>/dev/null || echo "$QSB"))"
+done
+
+exit "$status"

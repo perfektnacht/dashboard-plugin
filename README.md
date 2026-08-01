@@ -382,13 +382,25 @@ qmllint -I /usr/share/omarchy/shell Widget.qml
 
 `shaders/crt.frag` is the source; `shaders/crt.frag.qsb` is what Qt actually
 loads. **Editing the `.frag` alone changes nothing** — recompile it, and commit
-both files:
+everything it writes:
 
 ```bash
-qsb --qt6 -o shaders/crt.frag.qsb shaders/crt.frag   # needs qt6-shadertools
+bin/build-shader        # needs qt6-shadertools (Arch) / qt6-shader-baker (Debian)
 ```
 
-`qsb` may not be on your `PATH`; on Arch it lives at `/usr/lib/qt6/bin/qsb`.
+It finds `qsb` wherever the distribution put it — on Arch that is
+`/usr/lib/qt6/bin/qsb`, which is not on `PATH` — or takes `QSB=/path/to/qsb`.
+Alongside the `.qsb` it writes a `.sha256` of the source it compiled, and CI
+fails if that hash stops matching the `.frag`. That is the check for the failure
+this warns about: the compiled artifact has to be committed, because installing
+the plugin is a clone with no build step, so a `.frag` edit that never got
+recompiled would otherwise be completely silent.
+
+CI also checks two things the compiler will not. Every uniform must have a
+matching `property` on the `ShaderEffect` — a mismatch is not an error in
+either language; the uniform just reads zero. And the offset comments in the
+uniform block are re-derived from the `std140` rules, so a reordering that
+shifts them is caught while it is still a stale comment.
 
 The uniform block is `std140`, which means the order of the declarations is
 load-bearing: a `vec2` has to sit on an 8-byte boundary and a `vec4` on a

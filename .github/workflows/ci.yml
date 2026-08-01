@@ -55,10 +55,12 @@ jobs:
           ! grep -nE '#[0-9A-Fa-f]{3,8}' Widget.qml
           ! grep -nEi ':[[:space:]]*"(white|black|red|green|blue|gray|grey)"' Widget.qml
 
-      - name: bin/dashboard is executable and passes shellcheck
+      - name: the scripts in bin are executable and pass shellcheck
         run: |
-          test -x bin/dashboard
-          shellcheck bin/dashboard
+          for script in bin/*; do
+            test -x "$script" || { echo "$script is not executable"; exit 1; }
+            shellcheck "$script"
+          done
 
       - name: bin/dashboard usage contract
         run: |
@@ -211,6 +213,99 @@ jobs:
             grep -q "\"$key\"" bin/dashboard
             grep -q "setPref(\"$key\"" Widget.qml
           done
+
+      - name: the compiled shader is not stale
+        run: |
+          # The .qsb is what the widget loads, and it has to be committed —
+          # installing the plugin is a git clone with no build step. So an edit
+          # to the .frag that never got recompiled changes nothing at runtime
+          # and leaves no trace. Rebuilding here and diffing bytes would not
+          # work: qsb's output differs between Qt versions, and the runner's
+          # will not match a developer's. bin/build-shader records the hash of
+          # the source it compiled, so comparing that answers the question
+          # without needing qsb on the runner at all.
+          for frag in shaders/*.frag; do
+            test -f "$frag.qsb"   || { echo "$frag has no compiled .qsb"; exit 1; }
+            test -f "$frag.sha256" || { echo "$frag has no recorded hash"; exit 1; }
+            recorded="$(cat "$frag.sha256")"
+            actual="$(sha256sum "$frag" | cut -d' ' -f1)"
+            if [ "$recorded" != "$actual" ]; then
+              echo "$frag has changed since $frag.qsb was built."
+              echo "Run bin/build-shader and commit both outputs."
+              exit 1
+            fi
+          done
+
+      - name: the shader and the widget agree on the uniforms
+        run: |
+          # ShaderEffect binds uniforms to QML properties by name. A uniform
+          # with no property silently reads zero; a property with no uniform is
+          # dead code that reads like a working dial. Neither is a compile
+          # error in either language.
+          python3 - <<'PY'
+          import re, sys
+
+          src = open('shaders/crt.frag').read()
+          block = re.search(r'uniform buf \{(.*?)\n\};', src, re.S).group(1)
+          # qt_Matrix and qt_Opacity are supplied by Qt itself, not by the QML.
+          uniforms = [
+              (m.group(2), m.group(1))
+              for m in re.finditer(r'^\s*(float|vec2|vec3|vec4|mat4)\s+(\w+);',
+                                   block, re.M)
+              if not m.group(2).startswith('qt_')
+          ]
+
+          qml = open('Widget.qml').read()
+          i = qml.index('ShaderEffect {')
+          effect = qml[i:qml.index('fragmentShader', i)]
+          props = set(re.findall(r'property\s+\S+\s+(\w+)\s*:', effect)) - {'source'}
+
+          names = {n for n, _ in uniforms}
+          bad = False
+          for missing in sorted(names - props):
+              print(f'uniform {missing} has no property on the ShaderEffect')
+              bad = True
+          for extra in sorted(props - names):
+              print(f'property {extra} matches no uniform in crt.frag')
+              bad = True
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: the std140 offset comments are correct
+        run: |
+          # The offsets are written by hand next to each member, and they are
+          # load-bearing documentation: adding or removing a scalar shifts
+          # everything after it, and a vec2/vec4 that lands off its 8- or
+          # 16-byte boundary gets padded somewhere the comments no longer
+          # describe. Re-deriving them from the std140 rules keeps the comments
+          # honest, and catches the reordering mistake while it is still a
+          # comment mismatch rather than a colour arriving in the wrong slot.
+          python3 - <<'PY'
+          import re, sys
+
+          SIZE  = {'float': 4, 'vec2': 8,  'vec3': 12, 'vec4': 16, 'mat4': 64}
+          ALIGN = {'float': 4, 'vec2': 8,  'vec3': 16, 'vec4': 16, 'mat4': 16}
+
+          src = open('shaders/crt.frag').read()
+          block = re.search(r'uniform buf \{(.*?)\n\};', src, re.S).group(1)
+
+          offset = 0
+          bad = False
+          for m in re.finditer(
+                  r'^\s*(float|vec2|vec3|vec4|mat4)\s+(\w+);(?:\s*//\s*(\d+))?',
+                  block, re.M):
+              typ, name, comment = m.group(1), m.group(2), m.group(3)
+              align = ALIGN[typ]
+              offset = (offset + align - 1) // align * align
+              if comment is None:
+                  print(f'{name}: no offset comment (expected {offset})')
+                  bad = True
+              elif int(comment) != offset:
+                  print(f'{name}: comment says {comment}, std140 puts it at {offset}')
+                  bad = True
+              offset += SIZE[typ]
+          sys.exit(1 if bad else 0)
+          PY
 
       - name: icon names are whitelisted, not escaped
         run: |
