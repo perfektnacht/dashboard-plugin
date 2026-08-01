@@ -122,7 +122,6 @@ The icon cache is separate and safe to delete at any time; it refetches.
 | Trash button, Delete | Delete the highlighted service (asks first) |
 | Gear button, Ctrl+, | Settings |
 | Escape | Leave the form or settings, or close the panel |
-| Tab / Shift+Tab | In the list, move to the next/previous bar panel. In the form, move between fields |
 
 The plus and gear sit in the panel header; the pencil and trash appear on the
 row under the cursor. They're drawn as Nerd Font icons, which is why they're
