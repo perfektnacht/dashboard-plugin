@@ -29,7 +29,12 @@ Panel {
 
   readonly property int panelWidth: Style.space(400)
   readonly property int rowHeight: Style.space(50)
-  readonly property int iconSlot: Style.space(24)
+  // The tile every icon sits in, and the box the artwork is drawn into inside
+  // it. Two numbers rather than one because the icons come from anywhere:
+  // a padded tile at a fixed canvas size is what stops a screenshot-ish PNG
+  // and a bleed-to-the-edge gradient SVG from reading at different weights.
+  readonly property int iconSlot: Style.space(32)
+  readonly property int iconCanvas: Style.space(20)
   readonly property int maxListHeight: Style.space(340)
 
   property var services: []
@@ -59,6 +64,18 @@ Panel {
   property var savePending: null
 
   readonly property string errorText: loadError !== "" ? loadError : saveError
+
+  // The hero's second line. PanelHero uppercases it, so it's written in
+  // sentence case here. Says how many services there are, and how many the
+  // search narrowed them to — the count is the one fact a list of links can
+  // report about itself before anything probes the network.
+  readonly property string heroMeta: {
+    if (!loaded) return "Loading…"
+    var total = services.length
+    if (total === 0) return "No services yet"
+    if (query.trim() !== "") return rows.length + " of " + total + " shown"
+    return total + (total === 1 ? " service" : " services")
+  }
 
   readonly property var pendingDeleteService: {
     for (var i = 0; i < services.length; i++)
@@ -571,19 +588,50 @@ Panel {
         width: parent.width
         spacing: Style.space(10)
 
-        // ------------------------------------------------ list: search + add
+        // ------------------------------------------------------ list: header
+        //
+        // Add lives in the hero's trailing slot rather than beside the search
+        // field: it's an action on the whole list, not on the query, and the
+        // search row reads as a single control without it.
+        PanelHero {
+          visible: root.mode === "list"
+          width: parent.width
+          title: "Dashboard"
+          meta: root.heroMeta
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+
+          iconComponent: Component {
+            Text {
+              text: "󰕮"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
+            }
+          }
+
+          trailingControl: Component {
+            PanelActionButton {
+              iconText: "󰐕"
+              tooltipText: "Add a service  (Ctrl+N)"
+              foreground: root.dim
+              hoverColor: Color.accent
+              fontFamily: root.fontFamily
+              onClicked: root.openForm(null)
+            }
+          }
+        }
+
+        // ------------------------------------------------------ list: search
         Item {
           id: searchRow
           width: parent.width
-          height: Math.max(searchField.implicitHeight, addButton.implicitHeight)
+          height: searchField.implicitHeight
           visible: root.mode === "list"
 
           TextField {
             id: searchField
-            anchors.left: parent.left
-            anchors.right: addButton.left
-            anchors.rightMargin: Style.spacing.xs
-            anchors.verticalCenter: parent.verticalCenter
+            anchors.fill: parent
             placeholderText: "Search services…"
             foreground: root.foreground
             accent: Color.accent
@@ -638,18 +686,6 @@ Panel {
               }
             }
           }
-
-          PanelActionButton {
-            id: addButton
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            iconText: "󰐕"
-            tooltipText: "Add a service  (Ctrl+N)"
-            foreground: root.dim
-            hoverColor: Color.accent
-            fontFamily: root.fontFamily
-            onClicked: root.openForm(null)
-          }
         }
 
         Text {
@@ -692,7 +728,12 @@ Panel {
               positionViewAtIndex(currentIndex, ListView.Contain)
           }
 
-          delegate: BorderSurface {
+          // CursorSurface is the shell's row contract: idle rows paint
+          // nothing, and the one row under the keyboard cursor (or the mouse,
+          // which moves the cursor) carries the shared hover fill and border.
+          // A list of near-invisible filled slabs was competing with itself;
+          // one lit row against an empty column is what the built-in panels do.
+          delegate: CursorSurface {
             id: serviceRow
             required property var modelData
             required property int index
@@ -704,23 +745,28 @@ Panel {
 
             width: ListView.view.width
             height: root.rowHeight
-            radius: Style.cornerRadius
-            color: highlighted
-              ? Style.hoverFillFor(root.foreground, Color.accent)
-              : Util.alpha(root.foreground, 0.025)
-            borderSpec: Border.none()
+            hasCursor: highlighted
+            foreground: root.foreground
+            accent: Color.accent
 
-            Item {
+            BorderSurface {
               id: iconHolder
               width: root.iconSlot
               height: root.iconSlot
               anchors.left: parent.left
-              anchors.leftMargin: Style.spacing.controlPaddingX
+              anchors.leftMargin: Style.spacing.rowPaddingX
               anchors.verticalCenter: parent.verticalCenter
+              radius: Style.cornerRadius
+              // A frame of its own, so a logo with a white plate and a logo
+              // that bleeds to its own edges still occupy the same square.
+              color: Util.alpha(root.foreground, 0.07)
+              borderSpec: Border.none()
 
               Image {
                 id: iconImage
-                anchors.fill: parent
+                anchors.centerIn: parent
+                width: root.iconCanvas
+                height: root.iconCanvas
                 visible: serviceRow.iconPath !== "" && status === Image.Ready
                 source: serviceRow.iconPath !== ""
                   ? Util.fileUrl(serviceRow.iconPath)
@@ -730,8 +776,8 @@ Panel {
                 // An SVG is rasterised at sourceSize, not scaled from an
                 // intrinsic bitmap — without this it decodes at its viewBox
                 // size and comes out soft. Physical pixels, so HiDPI is crisp.
-                sourceSize.width: Math.round(iconHolder.width * Screen.devicePixelRatio)
-                sourceSize.height: Math.round(iconHolder.height * Screen.devicePixelRatio)
+                sourceSize.width: Math.round(root.iconCanvas * Screen.devicePixelRatio)
+                sourceSize.height: Math.round(root.iconCanvas * Screen.devicePixelRatio)
               }
 
               // Theme-aware fallback: a glyph in the bar foreground repaints on
@@ -775,12 +821,22 @@ Panel {
               }
             }
 
+            // Only on the row you're pointing at. Two glyph buttons on every
+            // row is most of the clutter in a list this short, and the mouse
+            // moves the cursor here on enter, so they're already up by the
+            // time a pointer could reach them. `enabled` tracks the fade so a
+            // faded-out button can't take a click it isn't offering; the Row
+            // keeps its width either way, so the name never reflows.
             Row {
               id: rowActions
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               anchors.rightMargin: Style.spacing.sm
               spacing: Style.spacing.xs
+              opacity: serviceRow.highlighted ? 1 : 0
+              enabled: serviceRow.highlighted
+
+              Behavior on opacity { NumberAnimation { duration: 80 } }
 
               PanelActionButton {
                 iconText: "󰏫"
@@ -814,20 +870,41 @@ Panel {
           }
         }
 
-        Text {
+        // An empty list is the first thing a new user sees, and one grey
+        // sentence on an otherwise blank panel reads like a failure. A glyph
+        // gives it a center of gravity and says which empty this is.
+        Column {
           visible: root.mode === "list" && root.rows.length === 0
           width: parent.width
-          text: {
-            if (!root.loaded) return "Loading…"
-            if (root.services.length === 0)
-              return "No services yet — 󰐕 or Ctrl+N to add one"
-            return "No matching services"
+          topPadding: Style.space(18)
+          bottomPadding: Style.space(18)
+          spacing: Style.space(10)
+
+          readonly property bool searching: root.loaded && root.services.length > 0
+
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: root.loaded
+            text: parent.searching ? "󰍉" : "󰒋"
+            color: Util.alpha(root.foreground, 0.22)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.displayLarge
           }
-          color: root.fainter
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          horizontalAlignment: Text.AlignHCenter
-          wrapMode: Text.WordWrap
+
+          Text {
+            width: parent.width
+            text: {
+              if (!root.loaded) return "Loading…"
+              if (root.services.length === 0)
+                return "No services yet — 󰐕 or Ctrl+N to add one"
+              return "No matching services"
+            }
+            color: root.fainter
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+          }
         }
 
         // ------------------------------------------------------------- form
