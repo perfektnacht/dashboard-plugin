@@ -207,7 +207,7 @@ jobs:
         run: |
           # Two copies of a key name drift. The helper whitelists them; the
           # widget is what passes them to set-pref.
-          for key in checkStatus pollStatus; do
+          for key in checkStatus pollStatus crtEnabled; do
             grep -q "\"$key\"" bin/dashboard
             grep -q "setPref(\"$key\"" Widget.qml
           done

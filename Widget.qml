@@ -58,8 +58,10 @@ Panel {
   property string prefError: ""
   property var prefQueue: []
 
-  // CRT phosphor pass over the panel contents.
-  property bool crtEnabled: true
+  // CRT phosphor pass over the panel contents. Off unless asked for: it is a
+  // strong look and it wakes the GPU every frame the panel is open, neither of
+  // which anybody should inherit by installing a list of links.
+  property bool crtEnabled: false
 
   // A phosphor screen emits light on a dark tube, so the effect assumes the
   // content is bright marks on a dark field. Give it a light theme and the
@@ -375,7 +377,8 @@ Panel {
   // what is where.
   readonly property var settingsRows: [
     { key: "checkStatus", value: checkStatus },
-    { key: "pollStatus", value: pollStatus }
+    { key: "pollStatus", value: pollStatus },
+    { key: "crtEnabled", value: crtEnabled }
   ]
 
   function openSettings() {
@@ -420,6 +423,9 @@ Panel {
         setPref("checkStatus", true)
         requestStatus()
       }
+    } else if (key === "crtEnabled") {
+      crtEnabled = !crtEnabled
+      setPref("crtEnabled", crtEnabled)
     }
   }
 
@@ -762,6 +768,7 @@ Panel {
         // version — or none at all — is a normal state, not a missing one.
         if (typeof values.checkStatus === "boolean") root.checkStatus = values.checkStatus
         if (typeof values.pollStatus === "boolean") root.pollStatus = values.pollStatus
+        if (typeof values.crtEnabled === "boolean") root.crtEnabled = values.crtEnabled
       }
     }
   }
@@ -1423,6 +1430,47 @@ Panel {
             text: "A service counts as up if it answers at all — a login page "
               + "or a 404 still means it's running. Only a refused connection, "
               + "an unknown name, or a timeout is down."
+            color: root.fainter
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator {
+            width: parent.width
+            foreground: root.foreground
+          }
+
+          PanelSectionHeader {
+            text: "APPEARANCE"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Toggle {
+            width: parent.width
+            label: "CRT mode"
+            description: "Scanlines, curvature and a phosphor glow"
+            checked: root.crtEnabled
+            hasCursor: root.settingsIndex === 2
+            foreground: root.foreground
+            accent: Color.accent
+            fontFamily: root.fontFamily
+            onClicked: {
+              root.settingsIndex = 2
+              root.toggleSetting("crtEnabled")
+            }
+            onHovered: function(isHovered) { if (isHovered) root.settingsIndex = 2 }
+          }
+
+          // Said here rather than by greying out the switch: the setting is
+          // real and it is stored, the theme just won't run it. Switching to a
+          // dark theme turns it on without the user touching this again.
+          Text {
+            visible: root.lightTheme
+            width: parent.width
+            text: "Off on a light theme — a phosphor screen needs a dark one. "
+              + "The setting is kept, and takes effect on your next dark theme."
             color: root.fainter
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

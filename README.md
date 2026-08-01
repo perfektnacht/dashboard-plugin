@@ -66,9 +66,11 @@ switch, Escape to go back.
 | ------- | ------- | --- |
 | Check when the panel opens | on | Probe every service each time the panel opens. Off means no UP/DOWN and no requests. |
 | Keep checking while open | off | Re-check every 15 seconds for as long as the panel stays open. Never runs behind a closed panel. |
+| CRT mode | off | The phosphor shader — see [CRT mode](#crt-mode). |
 
-The two move together, since neither half makes sense alone: turning polling on
-turns checking on with it, and turning checking off takes polling down.
+The two reachability toggles move together, since neither half makes sense
+alone: turning polling on turns checking on with it, and turning checking off
+takes polling down.
 
 These are stored in `prefs.json` beside the service list — not in `shell.json`,
 which a plugin can't write. Moving the list with `dataFile` moves them too.
@@ -76,19 +78,15 @@ Deleting the file resets both to their defaults.
 
 ## CRT mode
 
-The panel's contents are rendered through a phosphor shader — barrel warp,
+The panel's contents can be rendered through a phosphor shader — barrel warp,
 scanlines, aperture grille, bloom, a mains flicker, and a moulded bezel around a
-rounded glass edge. It is **on by default**.
+rounded glass edge.
 
-To turn it off, set `crtEnabled` to `false` near the top of `Widget.qml`:
-
-```qml
-property bool crtEnabled: true
-```
-
-It is not in the settings panel. Unlike the reachability toggles it costs
-nothing to get wrong — flip it, reload the shell, and you can see the answer —
-so it stayed a source-level switch rather than earning a row in `prefs.json`.
+It is **off by default**, and lives under **Appearance → CRT mode** in the
+settings panel (󰒓 or Ctrl+,). It's a strong look and it wakes the GPU for as
+long as the panel is open, which is not something to inherit by installing a
+list of links. Like the other toggles it's stored in `prefs.json`, so it
+survives a shell restart.
 
 **The phosphor colour follows your theme's accent.** A fixed Pip-Boy green was
 the first thing tried and it was the wrong thing: the shader converts to
@@ -103,6 +101,10 @@ panel turns into one glowing slab with the text lost inside it, and no choice of
 tint rescues it. `catppuccin-latte`, `flexoki-light`, `lupine`, `rose-pine` and
 `white` all render as a normal panel instead. That detection is a luminance test
 on `Color.background`, so a third-party light theme is covered too.
+
+The toggle still works on a light theme and still remembers what you set — it
+just doesn't run, and says so. Switch to a dark theme and it comes back on
+without you touching it again.
 
 Two costs worth knowing about:
 
