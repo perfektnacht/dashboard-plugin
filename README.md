@@ -79,14 +79,21 @@ Deleting the file resets both to their defaults.
 ## CRT mode
 
 The panel's contents can be rendered through a phosphor shader — barrel warp,
-scanlines, aperture grille, bloom, a mains flicker, and a moulded bezel around a
-rounded glass edge.
+scanlines, aperture grille, bloom, and a moulded bezel around a rounded glass
+edge.
 
 It is **off by default**, and lives under **Appearance → CRT mode** in the
-settings panel (󰒓 or Ctrl+,). It's a strong look and it wakes the GPU for as
-long as the panel is open, which is not something to inherit by installing a
-list of links. Like the other toggles it's stored in `prefs.json`, so it
-survives a shell restart.
+settings panel (󰒓 or Ctrl+,). It's a strong look, and not one to inherit by
+installing a list of links. Like the other toggles it's stored in `prefs.json`,
+so it survives a shell restart.
+
+**The image is static.** Every stage is a function of position alone, so the
+panel is drawn once and then costs nothing until something on it changes. There
+was a mains-hum flicker early on; it was removed rather than dialled back,
+because it was the only time-varying part of the effect and so on its own forced
+a repaint every frame the panel was open. Nobody could see it. Measured on the
+machine it was built on, an idle CRT panel now sits at the same GPU load as an
+idle plain one, which is none.
 
 **The phosphor colour follows your theme's accent.** A fixed Pip-Boy green was
 the first thing tried and it was the wrong thing: the shader converts to
@@ -108,9 +115,13 @@ without you touching it again.
 
 Two costs worth knowing about:
 
-- **It repaints continuously while open.** The flicker and the rolling band need
-  an animated clock. It is gated to an open panel, so nothing runs behind a
-  closed popup, but an open one is waking the GPU every frame.
+- **Every change to the panel is redrawn through the shader.** Typing in the
+  search field, moving the cursor and status arriving all repaint the whole
+  panel through it. That is bounded work rather than continuous, but it has only
+  been measured on a discrete GPU, where the shader is too cheap to show up at
+  all against the cost of drawing a window. On much older integrated graphics it
+  may well be the part you notice, and there is no measurement here claiming
+  otherwise.
 - **The panel is bigger in CRT mode.** The frame and the margin of dark glass
   inside it are paid for by growing the panel, not by scaling the content down —
   a CRT effect has no business resampling the text of a list you actually read.

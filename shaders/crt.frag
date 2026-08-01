@@ -15,21 +15,23 @@ layout(location = 0) out vec4 fragColor;
 layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;      //   0
     float qt_Opacity;    //  64
-    float time;          //  68
-    float warp;          //  72
-    float scanline;      //  76
-    float scanPeriod;    //  80
-    float maskStrength;  //  84
-    float vignette;      //  88
-    float glow;          //  92
-    float aberration;    //  96
-    float tintAmount;    // 100
-    float flicker;       // 104
-    float glassCorner;   // 108
+    float warp;          //  68
+    float scanline;      //  72
+    float scanPeriod;    //  76
+    float maskStrength;  //  80
+    float vignette;      //  84
+    float glow;          //  88
+    float aberration;    //  92
+    float tintAmount;    //  96
+    float glassCorner;   // 100
     // A vec2, not a scalar: UV is normalised per axis, so one number would
     // make the frame thicker on the long side of a panel that isn't square.
-    vec2 bezel;          // 112
-    vec2 resolution;     // 120
+    vec2 bezel;          // 104
+    vec2 resolution;     // 112
+    // 120 is not 16-aligned, so the vec4s start at 128 and eight bytes go to
+    // padding. Left as it falls rather than reordered: the eight bytes cost
+    // nothing and the declaration order still reads in the order the effect
+    // applies them.
     vec4 tint;           // 128
     vec4 bezelTint;      // 144
 };
@@ -147,12 +149,13 @@ void main() {
     else              maskTint.b = 1.0 + maskStrength * 0.5;
     color *= maskTint;
 
-    // Mains hum: a slow brightness wobble plus a bright band rolling up the
-    // screen, which is the thing that most reads as "this is a live tube"
-    // rather than "this is a picture of one".
-    float roll = sin((uv.y + time * 0.15) * 6.28318) * 0.5 + 0.5;
-    color *= 1.0 + flicker * (0.015 * sin(time * 6.0) + 0.02 * pow(roll, 8.0));
-
+    // There was a mains-hum stage here — a slow brightness wobble and a band
+    // rolling up the screen. It was removed rather than dialled down: nobody
+    // could see it, and it was the one thing in the effect that varied with
+    // time, so it alone forced a repaint every single frame the panel was
+    // open. Everything left is a pure function of position, which is what lets
+    // an open panel sit at zero GPU load instead of at a steady drain.
+    //
     // Vignette, on the warped coordinates so it follows the bowed edge.
     vec2 v = uv * (1.0 - uv.yx);
     float vig = pow(v.x * v.y * 22.0, vignette * 0.6);

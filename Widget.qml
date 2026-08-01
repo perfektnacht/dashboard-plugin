@@ -93,17 +93,6 @@ Panel {
   // shader's gradient, in whatever colours the theme is already using.
   readonly property color crtBezelColor: Qt.tint(Color.background,
     Qt.rgba(foreground.r, foreground.g, foreground.b, 0.13))
-  // Drives the flicker and the rolling band. Only advances while the panel is
-  // open — an idle popup has no business waking the GPU every frame.
-  property real crtTime: 0
-
-  NumberAnimation on crtTime {
-    running: root.opened && root.crtActive
-    loops: Animation.Infinite
-    from: 0
-    to: 1000
-    duration: 1000000
-  }
 
   property string query: ""
   property int highlightedIndex: -1
@@ -1662,7 +1651,10 @@ Panel {
       visible: root.crtActive
 
       property variant source: crtSource
-      property real time: root.crtTime
+      // Every uniform here is constant, which is the point: with nothing
+      // animating, Qt stops rendering the pass entirely once the content
+      // settles, and an open panel costs the GPU nothing at all.
+      //
       // Warp and vignette are both dialled well back from where they started.
       // They are the two effects that cost the corners their light, and the
       // corners are where this panel keeps its add button and its status
@@ -1675,7 +1667,6 @@ Panel {
       property real glow: 0.55
       property real aberration: 0.5
       property real tintAmount: 1.0
-      property real flicker: 1.0
       property real glassCorner: 0.10
       // Per axis, so the frame is the same pixel thickness all the way round
       // rather than a letterbox on the long side. The layout works in pixels;
