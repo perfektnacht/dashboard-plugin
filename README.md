@@ -28,10 +28,18 @@ a text editor show up as soon as you open it again.
 
 ## Reachability
 
-Each row carries a dot on the corner of its icon: **accent** when the service
-answered, **red** when it didn't, and **grey** while the check is still out. The
-hero line counts them — `4 services · 2 up`, or `· all up` when nothing needs
-attention.
+Each row says **UP** or **DOWN** at its right edge, and nothing at all until the
+check comes back. The hero line counts them — `4 services · 2 up`, or `· all up`
+when nothing needs attention.
+
+It's a word rather than a coloured dot on purpose: a dot carries its whole
+meaning in its hue, which is one colour-blind reader or one heavily tinted theme
+away from saying nothing. The colour is still there as a second channel.
+
+The status shares its slot with the row's 󰏫 and 󰆴 buttons, which appear on the
+row under the cursor. You want the status while scanning the list and the
+buttons once you've picked a row, so the two trade places instead of stacking —
+which is also why an unpointed-at list shows no cursor at all.
 
 The check is an HTTP GET, not a ping. Every row here is one click from a
 browser, so the question worth answering is whether a browser would get
@@ -56,7 +64,7 @@ switch, Escape to go back.
 
 | Setting | Default | |
 | ------- | ------- | --- |
-| Check when the panel opens | on | Probe every service each time the panel opens. Off means no dots and no requests. |
+| Check when the panel opens | on | Probe every service each time the panel opens. Off means no UP/DOWN and no requests. |
 | Keep checking while open | off | Re-check every 15 seconds for as long as the panel stays open. Never runs behind a closed panel. |
 
 The two move together, since neither half makes sense alone: turning polling on
@@ -65,6 +73,47 @@ turns checking on with it, and turning checking off takes polling down.
 These are stored in `prefs.json` beside the service list — not in `shell.json`,
 which a plugin can't write. Moving the list with `dataFile` moves them too.
 Deleting the file resets both to their defaults.
+
+## CRT mode
+
+The panel's contents are rendered through a phosphor shader — barrel warp,
+scanlines, aperture grille, bloom, a mains flicker, and a moulded bezel around a
+rounded glass edge. It is **on by default**.
+
+To turn it off, set `crtEnabled` to `false` near the top of `Widget.qml`:
+
+```qml
+property bool crtEnabled: true
+```
+
+It is not in the settings panel. Unlike the reachability toggles it costs
+nothing to get wrong — flip it, reload the shell, and you can see the answer —
+so it stayed a source-level switch rather than earning a row in `prefs.json`.
+
+**The phosphor colour follows your theme's accent.** A fixed Pip-Boy green was
+the first thing tried and it was the wrong thing: the shader converts to
+luminance before tinting, so a fixed colour erases the palette completely and
+renders every dark theme identically. Driven from the accent, `matte-black` gets
+a genuine amber tube, `gruvbox` a sage one, `ristretto` a red one — and the
+panel still belongs to the desktop around it.
+
+**Light themes switch it off automatically.** A phosphor screen is bright marks
+on a dark tube. A light theme has luminance near 1 nearly everywhere, so the
+panel turns into one glowing slab with the text lost inside it, and no choice of
+tint rescues it. `catppuccin-latte`, `flexoki-light`, `lupine`, `rose-pine` and
+`white` all render as a normal panel instead. That detection is a luminance test
+on `Color.background`, so a third-party light theme is covered too.
+
+Two costs worth knowing about:
+
+- **It repaints continuously while open.** The flicker and the rolling band need
+  an animated clock. It is gated to an open panel, so nothing runs behind a
+  closed popup, but an open one is waking the GPU every frame.
+- **The panel is bigger in CRT mode.** The frame and the margin of dark glass
+  inside it are paid for by growing the panel, not by scaling the content down —
+  a CRT effect has no business resampling the text of a list you actually read.
+
+Editing the shader means recompiling it; see [Development](#development).
 
 ## Services
 
@@ -280,6 +329,10 @@ of this one (and any other) before you enable it.
 - `qt6-svg` — Qt's SVG image handler. Without it SVG icons stay as the fallback
   glyph and nothing else breaks; `.png` icon URLs still render.
 
+`qt6-shadertools` is **not** required to run this. The CRT shader is compiled
+ahead of time and the resulting `.qsb` is committed, so installing the plugin
+needs nothing extra. It is only needed to *change* the shader — see below.
+
 ## bin/dashboard
 
 Every read, write, and fetch goes through this script so the QML thread never
@@ -309,7 +362,28 @@ has the icon, which is kept distinct from `1` (an error) and `2` (bad usage).
 omarchy plugin validate .            # check manifest.json against the plugin schema
 jq empty manifest.json               # check the manifest parses
 shellcheck bin/dashboard
+qmllint -I /usr/share/omarchy/shell Widget.qml
 ```
+
+### Editing the shader
+
+`shaders/crt.frag` is the source; `shaders/crt.frag.qsb` is what Qt actually
+loads. **Editing the `.frag` alone changes nothing** — recompile it, and commit
+both files:
+
+```bash
+qsb --qt6 -o shaders/crt.frag.qsb shaders/crt.frag   # needs qt6-shadertools
+```
+
+`qsb` may not be on your `PATH`; on Arch it lives at `/usr/lib/qt6/bin/qsb`.
+
+The uniform block is `std140`, which means the order of the declarations is
+load-bearing: a `vec2` has to sit on an 8-byte boundary and a `vec4` on a
+16-byte one. Get it wrong and the values arrive silently in the wrong slots
+rather than failing to compile, so keep the offset comments in the block honest
+when adding a uniform. Every uniform is also a property on the `ShaderEffect` in
+`Widget.qml`, matched by name — add one in the shader and you must add it there
+too, or it reads as zero.
 
 `omarchy plugin validate` needs an Omarchy machine, so CI can't run it —
 `.github/workflows/ci.yml` covers the rest: manifest fields, shellcheck, the
@@ -319,7 +393,10 @@ locally before tagging a release.
 
 Every color in the widget comes from `Color`, `Style`, or `bar.foreground`, so
 switching themes repaints it live. Keep it that way: a literal hex value is a
-color that stops following the theme, and CI fails on one.
+color that stops following the theme, and CI fails on one. That applies to the
+shader as well — its tint and bezel colours are passed in from the theme rather
+than baked into the `.frag`, which is why CRT mode looks different on every
+theme instead of the same green on all of them.
 
 ## License
 
