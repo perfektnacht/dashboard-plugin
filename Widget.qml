@@ -916,23 +916,50 @@ Panel {
         // In settings mode a stray letter has nowhere to go: typing into the
         // hidden search field would silently filter a list you can't see.
         if (root.pendingDeleteId !== "" || root.mode === "settings") return
+        // Qt gives Ctrl+letter an ASCII control character as its text — Ctrl+N
+        // is "\x0E" — and PanelKeyCatcher forwards anything one character long
+        // without looking at what it is. Appending that put an unprintable box
+        // in the query instead of running the shortcut. Filter them here: no
+        // control code is ever something the user meant to search for.
+        if (text.charCodeAt(0) < 0x20 || text.charCodeAt(0) === 0x7f) return
         searchField.text += text
         searchField.forceActiveFocus()
         searchField.cursorPosition = searchField.text.length
       }
 
-      // Ctrl+, is claimed here rather than in the search field's key handler,
-      // where every other shortcut lives. PanelKeyCatcher sees keys first and
-      // forwards anything with printable text straight into the search box —
-      // Ctrl+N survives that because Qt hands it a control character, but
-      // Ctrl+, arrives as a plain "," and lands in the query before a field
-      // handler ever runs. A Shortcut consumes the event outright. Scoped to
-      // an open panel in list mode, so it can't fire from the form, from the
-      // settings view it opens, or from a closed popup.
+      // The panel's shortcuts are claimed here rather than in the search
+      // field's key handler because the field does not have focus yet for the
+      // first event loop turn after the panel opens — onOpenedChanged hands it
+      // focus through Qt.callLater, and until that runs PanelKeyCatcher is the
+      // focus target. A key pressed in that window never reaches the field, so
+      // a field-only shortcut silently does nothing on the fastest way anyone
+      // actually opens the panel: click the icon, type the shortcut.
+      //
+      // A Shortcut consumes the event outright and does not care who has focus,
+      // which covers that window and every moment after it. Scoped to an open
+      // panel in list mode so they can't fire from the form, from the settings
+      // view, or from a closed popup, and held off while a delete confirmation
+      // is up — that dialog gets first refusal on every other key, and these
+      // should not be the ones that slip past it.
       Shortcut {
         sequence: "Ctrl+,"
-        enabled: root.opened && root.mode === "list"
+        enabled: root.opened && root.mode === "list" && root.pendingDeleteId === ""
         onActivated: root.openSettings()
+      }
+
+      Shortcut {
+        sequence: "Ctrl+N"
+        enabled: root.opened && root.mode === "list" && root.pendingDeleteId === ""
+        onActivated: root.openForm(null)
+      }
+
+      Shortcut {
+        sequence: "Ctrl+E"
+        enabled: root.opened && root.mode === "list" && root.pendingDeleteId === ""
+        onActivated: {
+          var editRow = root.highlightedRow()
+          if (editRow) root.openForm(editRow.service)
+        }
       }
 
       Column {
@@ -1017,9 +1044,11 @@ Panel {
               root.refreshRows()
             }
 
-            // The field holds focus while the panel is open, so PanelKeyCatcher
-            // never sees these keys — every shortcut the panel supports has to
-            // be handled (and forwarded) here too.
+            // The field holds focus for as long as the panel is open, so
+            // PanelKeyCatcher never sees these keys and they have to be handled
+            // here. The Ctrl+ shortcuts are the exception and live on Shortcuts
+            // beside the catcher: those have to work in the turn before this
+            // field is focused, which a handler here cannot do.
             Keys.onPressed: function(event) {
               // The confirmation gets first refusal: it needs Left/Right, which
               // the text cursor would otherwise swallow.
@@ -1042,13 +1071,6 @@ Panel {
                 event.accepted = true
               } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 root.activateRow(root.highlightedRow())
-                event.accepted = true
-              } else if (event.key === Qt.Key_N && (event.modifiers & Qt.ControlModifier)) {
-                root.openForm(null)
-                event.accepted = true
-              } else if (event.key === Qt.Key_E && (event.modifiers & Qt.ControlModifier)) {
-                var editRow = root.highlightedRow()
-                if (editRow) root.openForm(editRow.service)
                 event.accepted = true
               } else if (event.key === Qt.Key_Delete) {
                 var deleteRow = root.highlightedRow()
