@@ -15,15 +15,10 @@ inside the panel; nothing has to be hand-edited to use it.
 omarchy plugin add https://github.com/perfektnacht/dashboard-plugin.git --enable && omarchy restart shell
 ```
 
+`--enable` registers the plugin and asks which section of the bar to put it in.
+
 Omarchy shell plugins run unsandboxed inside the shell process — read the source
 of this one (and any other) before you enable it.
-
-`--enable` registers the plugin, but a bar widget also needs a place in the
-layout. If the icon doesn't appear, put it in a section explicitly:
-
-```bash
-omarchy plugin enable perfektnacht.dashboard-plugin --section right
-```
 
 ### By hand
 
