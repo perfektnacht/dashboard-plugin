@@ -58,6 +58,51 @@ Panel {
   property string prefError: ""
   property var prefQueue: []
 
+  // CRT phosphor pass over the panel contents.
+  property bool crtEnabled: true
+
+  // A phosphor screen emits light on a dark tube, so the effect assumes the
+  // content is bright marks on a dark field. Give it a light theme and the
+  // whole panel becomes one glowing slab with dark text lost inside it —
+  // catppuccin-latte, flexoki-light, lupine, rose-pine and white all fail this
+  // way, and no choice of tint rescues any of them. Five of the twenty-two
+  // stock themes, so it is worth detecting rather than documenting.
+  readonly property bool lightTheme: (0.299 * Color.background.r
+    + 0.587 * Color.background.g
+    + 0.114 * Color.background.b) > 0.5
+  readonly property bool crtActive: crtEnabled && !lightTheme
+  // Thickness of the moulded frame around the glass, in pixels, and zero when
+  // the effect is off so the layout collapses back to exactly what it was.
+  readonly property int crtBezel: crtActive ? Style.space(16) : 0
+  // Dark glass between the frame and the first pixel of content. No tube ever
+  // ran text to the edge of its phosphor — an Apple Monitor /// keeps a good
+  // centimetre of black around the last character — and here that margin is
+  // also load-bearing: content flush against the glass edge is content the
+  // barrel warp and the rounded corners eat, which is what cost "REACHABILITY"
+  // its R and "NEW SERVICE" its N.
+  readonly property int crtSafe: crtActive ? Style.space(14) : 0
+  // What the layout actually indents by. The shader only needs to know where
+  // the glass starts; the content sits further in than that.
+  readonly property int crtInset: crtBezel + crtSafe
+  // Not flat black. A frame that is pure black has no shape, which is what
+  // made the first attempt read as a ragged hole rather than a monitor — and
+  // on a black theme it would vanish into the desktop entirely. Lifting the
+  // background a little toward the foreground gives it a surface to catch the
+  // shader's gradient, in whatever colours the theme is already using.
+  readonly property color crtBezelColor: Qt.tint(Color.background,
+    Qt.rgba(foreground.r, foreground.g, foreground.b, 0.13))
+  // Drives the flicker and the rolling band. Only advances while the panel is
+  // open — an idle popup has no business waking the GPU every frame.
+  property real crtTime: 0
+
+  NumberAnimation on crtTime {
+    running: root.opened && root.crtActive
+    loops: Animation.Infinite
+    from: 0
+    to: 1000
+    duration: 1000000
+  }
+
   property string query: ""
   property int highlightedIndex: -1
   // Whether the cursor got where it is by pointing rather than by typing. The
@@ -276,7 +321,7 @@ Panel {
     rows = out
     // No cursor until there's a reason for one. Parking it on the first row
     // meant that row permanently traded its status for action buttons the user
-    // hadn't pointed at — the one row you could never read the state of was the
+    // hadn't pointed at — the one row you can never read the state of is the
     // top one. A query is a reason: the first match takes the cursor so Enter
     // opens what you just searched for.
     highlightedIndex = (rows.length > 0 && query.trim() !== "") ? 0 : -1
@@ -809,12 +854,18 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
+    // The bezel is paid for by growing the panel, not by shrinking the screen.
+    // Scaling the content down inside the shader would have made room for a
+    // frame at the cost of smaller, resampled text — the one thing a CRT
+    // effect must not do to a list you actually read.
     contentWidth: panel.fittedContentWidth(
       root.panelWidth
+        + root.crtInset * 2
         + panel.padding * 2
         + Border.left(panel.borderSpec)
         + Border.right(panel.borderSpec))
-    contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight, Style.space(560))
+    contentHeight: panel.fittedContentHeight(
+      contentColumn.implicitHeight + root.crtInset * 2, Style.space(560))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -890,7 +941,12 @@ Panel {
 
       Column {
         id: contentColumn
-        width: parent.width
+        // Inset past the frame *and* the safe area, so the first character of
+        // a left-aligned label starts well inside the glass. Zero when the
+        // effect is off, which puts the layout back exactly where it was.
+        x: root.crtInset
+        y: root.crtInset
+        width: parent.width - root.crtInset * 2
         spacing: Style.space(10)
 
         // ------------------------------------------------------ list: header
@@ -920,9 +976,9 @@ Panel {
               spacing: Style.spacing.xs
 
               // Full foreground, not the dimmed variant the row actions use.
-              // These two sit in the corner, which is the first place a glyph
-              // gets lost — dimmed, they read as decoration rather than as
-              // controls.
+              // These two sit in the corner, which is where a vignette is
+              // darkest and a curved edge steals the most light — dimmed
+              // glyphs disappeared there entirely.
               PanelActionButton {
                 iconText: "󰒓"
                 tooltipText: "Settings  (Ctrl+,)"
@@ -1158,11 +1214,12 @@ Panel {
               }
             }
 
-            // Reachability as a word rather than a colored dot. A dot carries
-            // its whole meaning in its hue, which is one filter or one
-            // colour-blind user away from saying nothing at all; a word still
-            // reads, and keeps the colour as a second channel rather than the
-            // only one.
+            // Reachability as a word rather than a colored dot. A dot is the
+            // obvious choice right up until the panel is run through a
+            // monochrome phosphor pass, at which point "answering" and "not
+            // answering" are the same grey circle in the same place. A word
+            // survives any amount of tinting, and still carries its color for
+            // anyone not running the shader.
             //
             // Shares the slot with the row actions instead of taking width of
             // its own: you want the status while scanning the list and the
@@ -1174,7 +1231,8 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               // Further in than the action buttons sit. Their glyphs are
               // centred in a 22px box, so they already clear the edge; a
-              // right-aligned word would otherwise end flush against it.
+              // right-aligned word would otherwise put its last letter in the
+              // darkest pixels the vignette has.
               anchors.rightMargin: Style.spacing.rowPaddingX
               visible: root.checkStatus
               opacity: serviceRow.highlighted ? 0 : 1
@@ -1524,6 +1582,75 @@ Panel {
           searchField.forceActiveFocus()
         }
       }
+    }
+
+    // ----------------------------------------------------------------- CRT
+    //
+    // The panel's content is rendered to a texture and drawn back through a
+    // phosphor shader. The key catcher keeps its place in the scene — only its
+    // rendering is suppressed — so every mouse area and key handler underneath
+    // still works exactly as before.
+    //
+    // What this does NOT cover is the panel's own background and border: those
+    // belong to KeyboardPanel, above this in the hierarchy, and sourcing them
+    // from inside would feed the effect its own output. The bezel stays crisp
+    // and the screen inside it curves, which is roughly how a real one looks.
+    ShaderEffectSource {
+      id: crtSource
+      anchors.fill: keyCatcher
+      sourceItem: keyCatcher
+      hideSource: root.crtActive
+      live: true
+      visible: false
+      // Text through a shader is only as sharp as the texture it was baked
+      // into, so the buffer is allocated at physical pixels.
+      textureSize: Qt.size(width * Screen.devicePixelRatio,
+        height * Screen.devicePixelRatio)
+    }
+
+    ShaderEffect {
+      id: crt
+      anchors.fill: keyCatcher
+      visible: root.crtActive
+
+      property variant source: crtSource
+      property real time: root.crtTime
+      // Warp and vignette are both dialled well back from where they started.
+      // They are the two effects that cost the corners their light, and the
+      // corners are where this panel keeps its add button and its status
+      // column — a look that eats the controls isn't a look, it's a bug.
+      property real warp: 0.32
+      property real scanline: 0.45
+      property real scanPeriod: 3.0
+      property real maskStrength: 0.05
+      property real vignette: 0.30
+      property real glow: 0.55
+      property real aberration: 0.5
+      property real tintAmount: 1.0
+      property real flicker: 1.0
+      property real glassCorner: 0.10
+      // Per axis, so the frame is the same pixel thickness all the way round
+      // rather than a letterbox on the long side. The layout works in pixels;
+      // the shader wants fractions of the panel.
+      property vector2d bezel: Qt.vector2d(
+        crt.width > 0 ? root.crtBezel / crt.width : 0,
+        crt.height > 0 ? root.crtBezel / crt.height : 0)
+      property vector2d resolution: Qt.vector2d(
+        crt.width * Screen.devicePixelRatio,
+        crt.height * Screen.devicePixelRatio)
+      // The phosphor colour comes from the theme, not from Fallout. A fixed
+      // green rendered every dark theme identically — tokyo-night, gruvbox,
+      // matte-black and ristretto were indistinguishable once the tint had
+      // erased their palettes, and the panel stopped belonging to the desktop
+      // around it. Driven from the accent, matte-black gets a genuine amber
+      // tube, gruvbox a sage one, ristretto a red one, and the effect follows
+      // a theme switch live the way every other colour here does.
+      property vector4d tint: Qt.vector4d(Color.accent.r, Color.accent.g,
+        Color.accent.b, 1.0)
+      property vector4d bezelTint: Qt.vector4d(root.crtBezelColor.r,
+        root.crtBezelColor.g, root.crtBezelColor.b, 1.0)
+
+      fragmentShader: Qt.resolvedUrl("shaders/crt.frag.qsb")
     }
   }
 }
