@@ -899,10 +899,14 @@ Panel {
             Row {
               spacing: Style.spacing.xs
 
+              // Full foreground, not the dimmed variant the row actions use.
+              // These two sit in the corner, which is the first place a glyph
+              // gets lost — dimmed, they read as decoration rather than as
+              // controls.
               PanelActionButton {
                 iconText: "󰒓"
                 tooltipText: "Settings  (Ctrl+,)"
-                foreground: root.dim
+                foreground: root.foreground
                 hoverColor: Color.accent
                 fontFamily: root.fontFamily
                 onClicked: root.openSettings()
@@ -911,7 +915,7 @@ Panel {
               PanelActionButton {
                 iconText: "󰐕"
                 tooltipText: "Add a service  (Ctrl+N)"
-                foreground: root.dim
+                foreground: root.foreground
                 hoverColor: Color.accent
                 fontFamily: root.fontFamily
                 onClicked: root.openForm(null)
@@ -1093,37 +1097,6 @@ Panel {
                 font.pixelSize: Style.font.icon
               }
 
-              // Reachability, badged on the tile rather than set inline with the
-              // name. The tile is the row's anchor and the one thing every row
-              // has, and its outer corner is the only part of a row the hover
-              // actions never reach — so the dot is readable on all four rows at
-              // once, not just the lit one.
-              //
-              // Three states, no green: accent for answering, urgent for not,
-              // and a faint foreground while the sweep is still out. Every one
-              // of those comes from the theme, so a light theme gets a dot it
-              // can actually see. Shape follows the theme's corners the way the
-              // rest of the kit does — a circle on round, a square on sharp.
-              Rectangle {
-                visible: root.checkStatus
-                width: Style.space(9)
-                height: width
-                radius: Style.cornerRadius > 0 ? width / 2 : 0
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.rightMargin: -Style.space(2)
-                anchors.bottomMargin: -Style.space(2)
-                color: {
-                  if (serviceRow.reachability === "up") return Color.accent
-                  if (serviceRow.reachability === "down") return Color.urgent
-                  return Util.alpha(root.foreground, 0.3)
-                }
-                // A ring in the panel's own background, so the dot reads as a
-                // badge sitting on the tile rather than a hole punched in it —
-                // and stays legible against a logo of any color underneath.
-                border.width: Style.space(2)
-                border.color: Color.popups.background
-              }
             }
 
             Column {
@@ -1153,6 +1126,41 @@ Panel {
                 font.pixelSize: Style.font.caption
                 elide: Text.ElideRight
               }
+            }
+
+            // Reachability as a word rather than a colored dot. A dot carries
+            // its whole meaning in its hue, which is one filter or one
+            // colour-blind user away from saying nothing at all; a word still
+            // reads, and keeps the colour as a second channel rather than the
+            // only one.
+            //
+            // Shares the slot with the row actions instead of taking width of
+            // its own: you want the status while scanning the list and the
+            // buttons once you've picked a row, never both at once. Nothing
+            // reflows, because the two trade places rather than stack.
+            Text {
+              id: rowStatus
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              // Further in than the action buttons sit. Their glyphs are
+              // centred in a 22px box, so they already clear the edge; a
+              // right-aligned word would otherwise end flush against it.
+              anchors.rightMargin: Style.spacing.rowPaddingX
+              visible: root.checkStatus
+              opacity: serviceRow.highlighted ? 0 : 1
+              text: {
+                if (serviceRow.reachability === "up") return "UP"
+                if (serviceRow.reachability === "down") return "DOWN"
+                // Nothing until the sweep lands. The hero already says it's
+                // checking; four rows of placeholder would just be noise.
+                return ""
+              }
+              color: serviceRow.reachability === "down" ? Color.urgent : Color.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+
+              Behavior on opacity { NumberAnimation { duration: 80 } }
             }
 
             // Only on the row you're pointing at. Two glyph buttons on every
