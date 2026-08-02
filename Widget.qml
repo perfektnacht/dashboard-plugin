@@ -1740,13 +1740,36 @@ Panel {
       // They are the two effects that cost the corners their light, and the
       // corners are where this panel keeps its add button and its status
       // column — a look that eats the controls isn't a look, it's a bug.
-      property real warp: 0.32
+      //
+      // Warp came down again after someone described the panel as "distorted".
+      // At 0.32 a corner was pulled 4.4px vertically against 2.0px
+      // horizontally, and this panel is almost entirely straight lines — a
+      // search field, row separators, a status column — so the bow had
+      // something to be measured against in a way a photograph never would.
+      // The asymmetry is what gave it away: horizontals visibly sagged while
+      // verticals barely moved. Halving it keeps the curve legible as glass
+      // and stops it reading as a wrong-shaped rectangle.
+      property real warp: 0.18
       property real scanline: 0.45
       property real scanPeriod: 3.0
       property real maskStrength: 0.05
       property real vignette: 0.30
       property real glow: 0.55
-      property real aberration: 0.5
+      // The bleed only starts above this, on a 0..1 luminance-ish scale. The
+      // panel's background sits far below it and the text well above, so the
+      // glow lands on the glyphs and leaves the black between them black.
+      property real bloomThreshold: 0.16
+      // Counters the softening the barrel warp's resampling costs the whole
+      // image. This is about as far as it goes: past here the undershoot on
+      // the dark side of a glyph stops reading as a crisp edge and starts
+      // reading as a halo, which looks like a sharpening filter rather than
+      // like a tube.
+      property real sharpen: 0.6
+      // Halved alongside the warp. A 0.75px red/blue split at the corners is
+      // fine on a photograph and not on 11px text, where it lands as a colour
+      // fringe on a stroke only a pixel or two wide and reads as the panel
+      // being out of focus rather than as a tube's convergence drifting.
+      property real aberration: 0.25
       property real tintAmount: 1.0
       property real glassCorner: 0.10
       // Physical pixels, matching `resolution`, because the shader measures the

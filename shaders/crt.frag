@@ -28,16 +28,18 @@ layout(std140, binding = 0) uniform buf {
     // fraction: a moulded corner has a radius, and a fraction of a panel that
     // isn't square would draw a quarter-ellipse instead.
     float outerCorner;   // 104
+    // Unsharp amount. Sits at 108 because bezel needs 8-byte alignment and so
+    // starts at 112 either way — this dial is free, occupying padding that was
+    // already being paid for.
+    float sharpen;       // 108
     // A vec2, not a scalar: UV is normalised per axis, so one number would
     // make the frame thicker on the long side of a panel that isn't square.
     vec2 bezel;          // 112
     vec2 resolution;     // 120
-    // 108 is not 8-aligned, so bezel starts at 112 and four bytes go to
-    // padding. Left as it falls rather than reordered: the four bytes cost
-    // nothing and the declaration order still reads in the order the effect
-    // applies them.
     vec4 tint;           // 128
     vec4 bezelTint;      // 144
+    // Floor the phosphor bleed has to clear before it lights anything.
+    float bloomThreshold; // 160
 };
 
 layout(binding = 1) uniform sampler2D source;
@@ -53,9 +55,6 @@ vec2 curve(vec2 uv, float amount) {
     return uv * 0.5 + 0.5;
 }
 
-// A cheap 8-tap bloom. A real CRT's phosphors bleed into their neighbours, and
-// without it the scanlines just look like a dark grid laid over a sharp image
-// rather than like light spreading through glass.
 // Signed distance to a rounded rectangle, negative inside. The glass gets its
 // corners from this rather than from the barrel warp alone: warp bends the
 // edges but still meets in a hard point at each corner, and a hard point is
@@ -65,7 +64,11 @@ float roundedBox(vec2 p, vec2 halfSize, float radius) {
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
 }
 
-vec3 bloom(vec2 uv, vec2 texel) {
+// A cheap 8-tap ring, which is to say a low-pass of the neighbourhood. It feeds
+// two stages that want opposite things from it: the phosphor bleed adds it, and
+// the unsharp mask subtracts it. Both read the same taps, so the sharpening
+// costs no texture fetches at all.
+vec3 lowPass(vec2 uv, vec2 texel) {
     vec3 sum = vec3(0.0);
     sum += texture(source, uv + texel * vec2(-1.0, -1.0)).rgb;
     sum += texture(source, uv + texel * vec2( 0.0, -1.5)).rgb;
@@ -141,7 +144,23 @@ void main() {
     color.g = texture(source, texUV).g;
     color.b = texture(source, texUV - shift).b;
 
-    color += bloom(texUV, texel) * glow;
+    vec3 blurred = lowPass(texUV, texel);
+
+    // Unsharp mask, before anything else touches the colour. The barrel warp
+    // lands almost every pixel on a fractional texel, so the bilinear filter
+    // has already softened the whole image by the time it gets here — this is
+    // not a stylistic sharpen, it is putting back what the resample took.
+    // Clamped at zero because the undershoot on the dark side of a glyph edge
+    // would otherwise go negative and show up as a black rim once the tint
+    // multiplies it back up.
+    color = max(color + (color - blurred) * sharpen, vec3(0.0));
+
+    // Phosphor bleed, from the lit phosphors only. Adding the low-pass
+    // unconditionally spread the dark gaps between glyphs just as eagerly as
+    // the glyphs themselves, which is a box blur wearing a glow's name: the
+    // text lost its edge and the background never got brighter for it. With a
+    // floor under it, only what is actually emitting light spreads.
+    color += max(blurred - bloomThreshold, vec3(0.0)) * glow;
 
     // Phosphor tint. Luminance first, so the tint replaces the hue rather than
     // washing over it — the difference between a green screen and a green
